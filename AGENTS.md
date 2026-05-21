@@ -20,3 +20,10 @@
 - 検索は `rg` を優先してください。なければ PowerShell 標準コマンドで代替してください。
 - TypeScript / Node.js の既存構成に合わせてください。
 - 主要な変更後は、可能な限り `npm test` または該当する軽量検証を実行してください。
+
+## Local UI Verification
+
+- UI 検証は既存の `http://127.0.0.1:5180/` を優先してください。
+- `5173` で dev server を勝手に起動しないでください。
+- Browser plugin の `iab` が unavailable の場合は、無理に別ブラウザを起動せず、HTTP 200 / `npm run ui:build` / `npm test` で代替検証してください。
+- Windows では `Start-Process npm` を使わないでください。必要な場合は `C:\Program Files\nodejs\npm.cmd` を明示してください。
