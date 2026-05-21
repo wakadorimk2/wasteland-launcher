@@ -15,24 +15,23 @@ test("visualization renders hero stats, treemap, heatmap, details, and warning h
   const pack = fixturePack();
   const html = renderVisualization(pack);
 
-  assert.match(html, /Enabled Mods/);
-  assert.match(html, /XML Ops/);
-  assert.match(html, /Conflicts/);
-  assert.match(html, /Warnings/);
-  assert.match(html, /Conflict Treemap/);
-  assert.match(html, /Conflict Heatmap/);
-  assert.match(html, /items\.xml/);
-  assert.match(html, /loot\.xml/);
-  assert.match(html, /progression\.xml/);
-  assert.match(html, /window\/xui/);
-  assert.match(html, /data-conflict-ids=/);
-  assert.match(html, /Top Risk Conflicts/);
-  assert.match(html, /Winner XPath/);
-  assert.match(html, /FastTravel/);
-  assert.match(html, /XUi\/windows\.xml/);
-  assert.match(html, /XML patch failed/);
-  assert.match(html, /exact/);
-  assert.match(html, /near/);
+  assert.match(html, /<title>7DTD Mod Conflict Analyzer<\/title>/);
+  assert.match(html, /id="app"/);
+  assert.match(html, /Dashboard/);
+  assert.match(html, /Load Order/);
+  assert.match(html, /XML Browser/);
+  assert.match(html, /Conflict Viewer/);
+  assert.match(html, /Tweaks Panel/);
+  assert.match(html, /"MODS"/);
+  assert.match(html, /"XML_FILES"/);
+  assert.match(html, /"CONFLICTS"/);
+  assert.match(html, /"XML_TREE"/);
+  assert.match(html, /"CONFLICT_KINDS"/);
+  assert.match(html, /"STATS"/);
+  assert.match(html, /window\.MODS/);
+  assert.match(html, /window\.CONFLICTS/);
+  assert.match(html, /window\.XML_FILES/);
+  assert.match(html, /__WASTELAND_CONTEXT__/);
 });
 
 test("conflict file ranking sorts by conflict count", () => {
@@ -94,7 +93,7 @@ test("visualize writes HTML to stdout when out is omitted", async () => {
   const { stdout } = await execFileAsync(process.execPath, [cliPath, "visualize", "--input", input]);
 
   assert.match(stdout, /^<!doctype html>/);
-  assert.match(stdout, /Wasteland Conflict Report/);
+  assert.match(stdout, /7DTD Mod Conflict Analyzer/);
   assert.match(stdout, /items\.xml/);
 });
 
