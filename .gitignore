@@ -1,6 +1,7 @@
 node_modules/
 dist/
 _analysis/
+ui/public/context.json
 
 *.log
 *.tmp

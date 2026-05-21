@@ -17,6 +17,17 @@ node dist/cli.js visualize --input _analysis\wasteland-context.json --out _analy
 
 All commands accept `--json` except `context-pack`, which already emits JSON or writes it to `--out`, and `visualize`, which emits HTML or writes it to `--out`.
 
+## React UI
+
+The `ui/` app is a local diagnostic viewer for `context-pack` JSON. It does not write to MO2, the game install, a dedicated server, or a remote PC.
+
+```powershell
+node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out ui\public\context.json
+npm run ui:dev
+```
+
+If `ui/public/context.json` is absent, the app loads bundled sample diagnostics. You can also load a `context-pack` JSON file from the toolbar. `Rescan` and `Apply zzz_ patch` are non-destructive placeholders in this first UI pass.
+
 ## Current Scope
 
 - Reads `profiles/<profile>/modlist.txt` as the source of enabled mod order.
