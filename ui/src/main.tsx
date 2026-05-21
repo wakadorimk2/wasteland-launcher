@@ -94,7 +94,7 @@ function App() {
         <span className="item"><RiskChip risk="safe" dot /> ready</span>
         <span className="item">{model.source === "context" ? "ContextPack" : "sample"}</span>
         <span className="item">{model.stats.modsEnabled}/{model.stats.modsLoaded} mods</span>
-        <span className="item danger-text">{model.stats.conflicts} conflicts</span>
+        <span className="item danger-text">{model.stats.conflicts} diagnostics</span>
         <span className="item critical-text">{model.stats.missingXPath} missing</span>
         <span className="spacer" />
         <span className="item">UTF-8</span>
@@ -111,7 +111,7 @@ function viewMeta(view: ViewId, selectedFile: string | null, model: UiModel) {
     dashboard: { title: "Dashboard", crumbs: ["analyzer", model.profile, "overview"] },
     "load-order": { title: "Mod Load Order", crumbs: ["analyzer", "mods", "load-order"] },
     "xml-browser": { title: "XML Target Browser", crumbs: ["analyzer", "xml"] },
-    conflict: { title: "Conflict Viewer", crumbs: ["analyzer", "conflicts", selectedFile ?? "browse"] },
+    conflict: { title: "Diagnostics", crumbs: ["analyzer", "trace", selectedFile ?? "browse"] },
     settings: { title: "Settings", crumbs: ["analyzer", "settings"] }
   };
   return map[view];
@@ -122,14 +122,14 @@ function Sidebar({ model, view, setView }: { model: UiModel; view: ViewId; setVi
     { id: "dashboard", label: "Dashboard", glyph: "D" },
     { id: "load-order", label: "Load Order", glyph: "L", count: model.mods.length },
     { id: "xml-browser", label: "XML Browser", glyph: "X", count: model.xmlFiles.length },
-    { id: "conflict", label: "Conflict Viewer", glyph: "C", count: model.conflicts.length },
+    { id: "conflict", label: "Diagnostics", glyph: "D", count: model.conflicts.length },
     { id: "settings", label: "Settings", glyph: "S" }
   ];
   return (
     <>
       <nav className="activity" aria-label="Views">
         {views.map((item) => (
-          <button key={item.id} className={`activity-btn ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)} data-badge={item.id === "conflict" ? item.count : undefined} title={item.label}>
+          <button key={item.id} className={`activity-btn ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)} data-badge={item.id === "conflict" ? compactCount(item.count) : undefined} title={item.label}>
             <span className="ico">{item.glyph}</span>
           </button>
         ))}
@@ -137,7 +137,7 @@ function Sidebar({ model, view, setView }: { model: UiModel; view: ViewId; setVi
       </nav>
       <aside className="sidebar">
         <div className="sidebar-head"><span>Explorer</span><span className="mono">.</span></div>
-        <div className="sidebar-section">
+        <div className="sidebar-section views-section">
           <div className="sidebar-section-title">Views</div>
           {views.map((item) => (
             <div key={item.id} className={`sidebar-item ${view === item.id ? "active" : ""}`} onClick={() => setView(item.id)}>
@@ -146,7 +146,7 @@ function Sidebar({ model, view, setView }: { model: UiModel; view: ViewId; setVi
           ))}
         </div>
         <div className="divider" />
-        <div className="sidebar-section">
+        <div className="sidebar-section mods-section">
           <div className="sidebar-section-title">Loaded Mods</div>
           {model.mods.slice(0, 80).map((mod) => (
             <div key={mod.id} className={`sidebar-item ${!mod.enabled ? "muted" : ""}`} onClick={() => setView("load-order")} title={`${mod.folder} (${mod.author})`}>
@@ -169,24 +169,24 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
       <div className="dash-grid">
         <Kpi label="Mods loaded" value={model.stats.modsLoaded} sub={`${model.stats.modsEnabled} enabled`} />
         <Kpi label="XML files touched" value={model.stats.xmlFiles} sub={`${model.stats.totalPatches.toLocaleString()} patches total`} risk="info" />
-        <Kpi label="Missing XPath" value={model.stats.missingXPath} sub="not confirmed by diagnostics" risk="critical" />
-        <Kpi label="Conflicts" value={model.stats.conflicts} sub={`${conflictByKind["direct-overwrite"] ?? 0} direct overwrite`} risk="danger" />
+        <Kpi label="XPath misses" value={model.stats.missingXPath} sub="not confirmed by replay" risk="critical" />
+        <Kpi label="Diagnostics" value={model.stats.conflicts} sub={`${conflictByKind["silent-overwrite"] ?? 0} silent overwrites`} risk="danger" />
         <Kpi label="Warnings" value={model.stats.warnings} sub={`load-order dependent: ${model.stats.loadOrderDependent}`} risk="warn" />
         <Kpi label="Safe changes" value={model.stats.safeChanges} sub="outside detected conflicts" risk="safe" />
       </div>
-      <SectionTitle label="Conflict breakdown" />
+      <SectionTitle label="Diagnostic summary" />
       <Panel>
         <Table headers={["", "Conflict kind", "Description", "Count", ""]}>
-          {(Object.entries(conflictKinds) as [keyof typeof conflictKinds, (typeof conflictKinds)[keyof typeof conflictKinds]][]).filter(([key]) => key !== "single-winner").map(([key, kind]) => (
+          {(Object.entries(conflictKinds) as [keyof typeof conflictKinds, (typeof conflictKinds)[keyof typeof conflictKinds]][]).filter(([key]) => key !== "ok").map(([key, kind]) => (
             <tr key={key} onClick={() => setView("conflict")}>
               <td><RiskChip risk={kind.risk} dot /></td><td className="mono">{kind.label}</td><td className="muted">{kind.desc}</td><td className="num mono">{conflictByKind[key] ?? 0}</td><td className="mono muted">open</td>
             </tr>
           ))}
         </Table>
       </Panel>
-      <SectionTitle label="Top conflicts to review" />
+      <SectionTitle label="Top diagnostics to review" />
       <Panel>
-        <Table headers={["", "File", "Node / Attribute", "Kind", "Mods involved", "Winner"]}>
+        <Table headers={["", "File", "Node / Attribute", "Kind", "Mods involved", "Final"]}>
           {valueReviewConflicts.slice(0, 80).map((conflict) => (
             <tr key={conflict.id} onClick={() => { setSelectedConflict(conflict.id); setView("conflict"); }}>
               <td><RiskChip risk={conflict.risk} dot /></td>
@@ -197,7 +197,7 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
               <td>{conflict.final ? <span className={`chip ${conflict.finalKind === "candidate" ? "info" : "safe"}`}>{conflict.finalKind === "candidate" ? "CANDIDATE" : "FINAL"} {conflict.final}</span> : <span className="chip critical">none</span>}</td>
             </tr>
           ))}
-          {valueReviewConflicts.length === 0 && <tr><td colSpan={6} className="muted">No value conflicts found. Open Conflict Viewer / Structural for append, remove, and insert operations.</td></tr>}
+          {valueReviewConflicts.length === 0 && <tr><td colSpan={6} className="muted">No value diagnostics found. Open Diagnostics / Structural for append, remove, and insert operations.</td></tr>}
         </Table>
       </Panel>
       <SectionTitle label="Mods overview" />
@@ -252,7 +252,7 @@ function XmlBrowser({ model, setView, setSelectedFile, highlightMod, setHighligh
     <div>
       <div className="filterbar"><input className="search wide" placeholder="filter file..." value={query} onChange={(event) => setQuery(event.target.value)} /><span className="mono muted">{filtered.length} files</span></div>
       <Panel>
-        <Table headers={["", "XML file", "Patches", "Mods touching", "Conflicts", "Missing", "Risk"]}>
+        <Table headers={["", "XML file", "Patches", "Mods touching", "Diagnostics", "Misses", "Risk"]}>
           {filtered.map((file) => (
             <tr key={file.path} onClick={() => { setSelectedFile(file.path); setView("conflict"); }}>
               <td><RiskChip risk={file.risk} dot /></td><td className="mono accent2">{file.path}</td><td className="num mono">{file.patches}</td><td><ChipList values={file.touchingMods.slice(0, 6)} /></td><td className="num mono danger-text">{file.conflicts}</td><td className="num mono critical-text">{file.missing}</td><td><RiskChip risk={file.risk} /></td>
@@ -447,6 +447,11 @@ function countBy(values: string[]) {
     acc[value] = (acc[value] ?? 0) + 1;
     return acc;
   }, {});
+}
+
+function compactCount(value: number | undefined): string | undefined {
+  if (value == null) return undefined;
+  return value > 999 ? "999+" : String(value);
 }
 
 function riskFromConflicts(risks: Risk[]): Risk {

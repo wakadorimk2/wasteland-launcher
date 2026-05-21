@@ -7,7 +7,7 @@ import { modsPath, modlistPath, toPosixRelative } from "./paths.js";
 import { readModlist } from "./modlist.js";
 import { parseXmlFile } from "./xml.js";
 
-const patchOperations = new Set(["append", "set", "remove", "insertBefore", "insertAfter"]);
+const patchOperations = new Set(["append", "set", "setattribute", "remove", "removeattribute", "insertBefore", "insertAfter", "csv"]);
 const serializer = new XMLSerializer();
 
 export async function scanMo2(mo2Path: string, profile: string): Promise<ScanResult> {
@@ -164,6 +164,7 @@ function extractPatchOperationsFromText(mod: ModRoot, configPath: string, file: 
       operation,
       xpath,
       line: openTagIndex >= 0 ? lineNumberAt(text, openTagIndex) : 1,
+      attributes: extractAttributes(element),
       valueKind: value.kind,
       valueText: value.text,
       valueSummary: value.summary
@@ -188,11 +189,22 @@ function stripBom(text: string): string {
   return text.replace(/^\uFEFF/, "");
 }
 
+function extractAttributes(element: any): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (let index = 0; index < (element.attributes?.length ?? 0); index += 1) {
+    const attribute = element.attributes.item(index);
+    if (attribute) {
+      attributes[attribute.name] = attribute.value;
+    }
+  }
+  return attributes;
+}
+
 function extractPatchValue(operation: string, element: any): { kind: XmlPatchOperation["valueKind"]; text?: string; summary?: string } {
-  if (operation === "remove") {
+  if (operation === "remove" || operation === "removeattribute") {
     return { kind: "target", summary: "remove target" };
   }
-  if (operation === "set") {
+  if (operation === "set" || operation === "setattribute" || operation === "csv") {
     const text = (element.textContent ?? "").trim();
     return { kind: text ? "text" : "empty", text, summary: summarizeValue(text) };
   }

@@ -1,12 +1,15 @@
-import type { ConflictCategory, ConflictGroup, ConflictKind, ConflictResolutionStep, ContextPack, Risk, UiAttr, UiModel, UiNode, UiXmlFile, XmlPatchOperation } from "./types";
+import type { ConflictCategory, ConflictKind, ContextPack, PatchTrace, Risk, UiAttr, UiModel, UiNode, UiXmlFile } from "./types";
 
 export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; desc: string }> = {
-  "direct-overwrite": { label: "Direct overwrite", risk: "danger", desc: "Multiple mods touch the same target; the later load-order winner is shown." },
-  "same-node-multi-touch": { label: "Same node multi-touch", risk: "info", desc: "Multiple operations affect the same node area." },
-  "structural-dependency": { label: "Structural dependency", risk: "warn", desc: "Add/remove style operations may depend on earlier structure." },
-  "missing-xpath": { label: "Missing XPath", risk: "critical", desc: "A patch target could not be confirmed from diagnostics." },
-  "load-order-dependent": { label: "Load order dependent", risk: "info", desc: "The current winner depends on mod order." },
-  "single-winner": { label: "Single winner", risk: "safe", desc: "Only one mod touches this diagnostic target." }
+  "xpath-miss": { label: "XPath miss", risk: "critical", desc: "The patch XPath matched no current target." },
+  "order-induced-miss": { label: "Order-induced miss", risk: "critical", desc: "An earlier patch removed a target used later." },
+  "dependency-order-miss": { label: "Dependency-order miss", risk: "warn", desc: "A patch appears to reference a target that is added later." },
+  "silent-overwrite": { label: "Silent overwrite", risk: "danger", desc: "A later scalar write hides an earlier write on the same canonical target." },
+  "structural-mask": { label: "Structural mask", risk: "warn", desc: "A structural operation hides or removes another change." },
+  "broad-match-risk": { label: "Broad selector", risk: "warn", desc: "The XPath matched multiple targets." },
+  "unsupported-operation": { label: "Unsupported op", risk: "info", desc: "The patch is inventoried but not replayed in v0.2." },
+  "parse-error": { label: "Parse error", risk: "critical", desc: "The patch or vanilla XML could not be parsed." },
+  ok: { label: "Applied", risk: "safe", desc: "The replayed patch has no diagnostic warning." }
 };
 
 const samplePack: ContextPack = {
@@ -16,92 +19,57 @@ const samplePack: ContextPack = {
     profile: "Sample",
     modlistPath: "sample://profiles/Sample/modlist.txt",
     entries: [
-      { raw: "+0_TFP_Harmony", name: "0_TFP_Harmony", state: "enabled", line: 1, order: 0 },
-      { raw: "+KHA21-HUDPlus", name: "KHA21-HUDPlus", state: "enabled", line: 2, order: 1 },
-      { raw: "+BiggerBackpack_60", name: "BiggerBackpack_60", state: "enabled", line: 3, order: 2 },
-      { raw: "+ZMXuiCP", name: "ZMXuiCP", state: "enabled", line: 4, order: 3 },
-      { raw: "+zzz_MyTweaks", name: "zzz_MyTweaks", state: "enabled", line: 5, order: 4 }
+      { raw: "+AlphaEconomy", name: "AlphaEconomy", state: "enabled", line: 1, order: 1 },
+      { raw: "+RemoveBaseItems", name: "RemoveBaseItems", state: "enabled", line: 2, order: 2 },
+      { raw: "+LateDependency", name: "LateDependency", state: "enabled", line: 3, order: 3 },
+      { raw: "+zzz_MyTweaks", name: "zzz_MyTweaks", state: "enabled", line: 4, order: 4 }
     ],
     enabledMods: [
-      { mo2Name: "0_TFP_Harmony", displayName: "TFP Harmony Core", rootPath: "", modInfoPath: "", order: 0, version: "1.0.0", author: "The Fun Pimps" },
-      { mo2Name: "KHA21-HUDPlus", displayName: "Khaine HUDPlus A21", rootPath: "", modInfoPath: "", order: 1, version: "21.2", author: "Khaine" },
-      { mo2Name: "BiggerBackpack_60", displayName: "Bigger Backpack (60 slots)", rootPath: "", modInfoPath: "", order: 2, version: "1.4", author: "khzmusik" },
-      { mo2Name: "ZMXuiCP", displayName: "ZMXui Compo Pack", rootPath: "", modInfoPath: "", order: 3, version: "5.0", author: "Sirillion" },
-      { mo2Name: "zzz_MyTweaks", displayName: "My Personal Tweaks", rootPath: "", modInfoPath: "", order: 4, version: "0.1", author: "you" }
+      { mo2Name: "AlphaEconomy", displayName: "Alpha Economy", rootPath: "", modInfoPath: "", order: 1 },
+      { mo2Name: "RemoveBaseItems", displayName: "Remove Base Items", rootPath: "", modInfoPath: "", order: 2 },
+      { mo2Name: "LateDependency", displayName: "Late Dependency", rootPath: "", modInfoPath: "", order: 3 },
+      { mo2Name: "zzz_MyTweaks", displayName: "My Tweaks", rootPath: "", modInfoPath: "", order: 4 }
     ],
     missingEnabledMods: [],
     xmlPatches: [
-      op("KHA21-HUDPlus", 1, "XUi/windows.xml", "/windows/window[@name='windowBackpack']", "set", 10),
-      op("BiggerBackpack_60", 2, "XUi/windows.xml", "/windows/window[@name='windowBackpack']", "set", 18),
-      op("ZMXuiCP", 3, "XUi/windows.xml", "/windows/window[@name='windowBackpack']", "set", 22),
-      op("zzz_MyTweaks", 4, "items.xml", "/items/item[@name='gunPistolT0PipePistol']/property[@name='EconomicValue']/@value", "set", 7, "80"),
-      op("KHA21-HUDPlus", 1, "XUi/xui.xml", "/xui/ruleset", "append", 12, "<rule name=\"hud\"/>", "xml", "append <rule name=\"hud\"/>"),
-      op("ZMXuiCP", 3, "items.xml", "/items/item[@name='gunPistolT0PipePistol']/property[@name='EconomicValue']/@value", "set", 28, "120"),
-      op("BiggerBackpack_60", 2, "XUi/xui.xml", "/xui/ruleset", "append", 30, "<rule name=\"bag\"/>", "xml", "append <rule name=\"bag\"/>"),
-      op("ZMXuiCP", 3, "items.xml", "/items/item[@name='foodCan']/property[@name='Stacknumber']/@value", "set", 40, "120"),
-      op("zzz_MyTweaks", 4, "items.xml", "/items/item[@name='foodCan']/property[@name='Stacknumber']/@value", "set", 41, "80"),
-      op("KHA21-HUDPlus", 1, "items.xml", "/items/item[@name='foodCan']", "append", 42, "<property name=\"CustomIconTint\" value=\"ffffff\"/>", "xml", "append <property CustomIconTint>")
+      op("AlphaEconomy", 1, "items.xml", "/items/item[@name='coin']/property[@name='EconomicValue']/@value", "set", 10, "120"),
+      op("zzz_MyTweaks", 4, "items.xml", "/items/item[@name='coin']/property[@name='EconomicValue']/@value", "set", 18, "80"),
+      op("RemoveBaseItems", 2, "items.xml", "/items/item[@name='oldCoin']", "remove", 20),
+      op("zzz_MyTweaks", 4, "items.xml", "/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value", "set", 21, "5"),
+      op("AlphaEconomy", 1, "items.xml", "/items/item[@name='futureCoin']/@value", "set", 22, "2"),
+      op("LateDependency", 3, "items.xml", "/items", "append", 23, "<item name=\"futureCoin\" value=\"1\"/>", "xml", "<item futureCoin>"),
+      op("AlphaEconomy", 1, "items.xml", "/items/item", "setattribute", 24, "checked", "text", "checked", { name: "tag", value: "checked" }),
+      op("AlphaEconomy", 1, "loot.xml", "/lootcontainers/lootgroup[@name='ammo']", "csv", 30, "ammoBullet,10")
     ],
     dlls: [],
     warnings: []
   },
+  trace: [],
   conflicts: [],
   logs: { warnings: [] }
 };
-samplePack.conflicts = [
-  {
-    file: "XUi/windows.xml",
-    normalizedXpath: "/windows/window[@name='windowBackpack']",
-    operations: [samplePack.scan.xmlPatches[5], samplePack.scan.xmlPatches[3]],
-    winner: samplePack.scan.xmlPatches[3],
-    exact: true,
-    resolution: {
-      status: "resolved",
-      vanillaValue: "100",
-      finalValue: "80",
-      finalSource: "zzz_MyTweaks",
-      history: [
-        { modName: "ZMXuiCP", displayName: "ZMXuiCP", order: 3, operation: "set", xpath: samplePack.scan.xmlPatches[5].xpath, beforeValue: "100", authoredValue: "120", afterValue: "120", status: "applied" },
-        { modName: "zzz_MyTweaks", displayName: "zzz_MyTweaks", order: 4, operation: "set", xpath: samplePack.scan.xmlPatches[3].xpath, beforeValue: "120", authoredValue: "80", afterValue: "80", status: "applied" }
-      ],
-      warnings: []
-    }
-  },
-  {
-    file: "XUi/windows.xml",
-    normalizedXpath: "/windows/window[@name='windowBackpack']",
-    operations: samplePack.scan.xmlPatches.slice(0, 3),
-    winner: samplePack.scan.xmlPatches[2],
-    exact: true
-  },
-  {
-    file: "XUi/xui.xml",
-    normalizedXpath: "/xui/ruleset",
-    operations: [samplePack.scan.xmlPatches[4], samplePack.scan.xmlPatches[6]],
-    winner: samplePack.scan.xmlPatches[6],
-    exact: true,
-    resolution: {
-      status: "unresolved",
-      history: [],
-      warnings: ["Resolution skipped for broad conflict candidate set (2 operations): XUi/xui.xml"]
-    }
-  },
-  {
-    file: "items.xml",
-    normalizedXpath: "/items/item[@name='foodCan']",
-    operations: [samplePack.scan.xmlPatches[7], samplePack.scan.xmlPatches[8], samplePack.scan.xmlPatches[9]],
-    winner: samplePack.scan.xmlPatches[9],
-    exact: false,
-    resolution: {
-      status: "unresolved",
-      history: [],
-      warnings: ["Structural append is unresolved, but exact set values can be reviewed as candidates."]
-    }
-  }
+
+samplePack.trace = [
+  trace(samplePack.scan.xmlPatches[0], "applied", "ok", [target("/items/item[@name='coin']/property[@name='EconomicValue']/@value", "attribute", "100")], [{ kind: "setAttribute", target: "/items/item[@name='coin']/property[@name='EconomicValue']/@value", before: "100", after: "120", value: "120" }]),
+  trace(samplePack.scan.xmlPatches[1], "applied", "silent-overwrite", [target("/items/item[@name='coin']/property[@name='EconomicValue']/@value", "attribute", "120")], [{ kind: "setAttribute", target: "/items/item[@name='coin']/property[@name='EconomicValue']/@value", before: "120", after: "80", value: "80" }]),
+  trace(samplePack.scan.xmlPatches[2], "applied", "ok", [target("/items/item[@name='oldCoin']", "element")], [{ kind: "removeNode", target: "/items/item[@name='oldCoin']", before: "<item name=\"oldCoin\"/>" }]),
+  trace(samplePack.scan.xmlPatches[3], "missed", "order-induced-miss", [], [{ kind: "miss", target: "/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value", summary: "order-induced-miss" }]),
+  trace(samplePack.scan.xmlPatches[4], "missed", "dependency-order-miss", [], [{ kind: "miss", target: "/items/item[@name='futureCoin']/@value", summary: "dependency-order-miss" }]),
+  trace(samplePack.scan.xmlPatches[5], "applied", "ok", [target("/items", "element")], [{ kind: "appendChild", target: "/items", value: "<item futureCoin>", summary: "1 child node(s)" }]),
+  trace(samplePack.scan.xmlPatches[6], "ambiguous", "broad-match-risk", [target("/items/item[@name='coin']", "element"), target("/items/item[@name='oldCoin']", "element")], [{ kind: "setAttribute", target: "/items/item[@name='coin']/@tag", before: undefined, after: "checked", value: "checked" }], 2),
+  trace(samplePack.scan.xmlPatches[7], "unsupported", "unsupported-operation", [], [{ kind: "unsupported", target: "/lootcontainers/lootgroup[@name='ammo']", summary: "csv replay is not implemented in v0.2" }])
 ];
 
-function op(modName: string, order: number, file: string, xpath: string, operation: string, line: number, valueText?: string, valueKind: "text" | "xml" | "target" | "empty" | "unknown" = "text", valueSummary?: string) {
-  return { modName, displayName: modName, order, file, path: xpath, operation, xpath, line, valueText, valueKind, valueSummary };
+function op(modName: string, order: number, file: string, xpath: string, operation: string, line: number, valueText?: string, valueKind: "text" | "xml" | "target" | "empty" | "unknown" = valueText == null ? "target" : "text", valueSummary = valueText, attributes?: Record<string, string>) {
+  return { modName, displayName: modName, order, file, path: xpath, operation, xpath, line, valueText, valueKind, valueSummary, attributes };
+}
+
+function trace(operation: ContextPack["scan"]["xmlPatches"][number], status: PatchTrace["status"], diagnosticKind: ConflictKind, affectedTargets: PatchTrace["affectedTargets"], effects: PatchTrace["effects"], matchCountBefore = affectedTargets.length): PatchTrace {
+  return { id: `${operation.file}:${operation.line}`, modName: operation.modName, displayName: operation.displayName, order: operation.order, file: operation.file, path: operation.path, line: operation.line, operation: operation.operation, xpath: operation.xpath, status, matchCountBefore, affectedTargets, effects, confidence: "high", diagnosticKind };
+}
+
+function target(canonical: string, kind: "element" | "attribute", value?: string) {
+  return { canonical, nodeRef: canonical.replace(/\/@[\w.-]+$/, ""), kind, value };
 }
 
 export function buildSampleModel(): UiModel {
@@ -109,70 +77,56 @@ export function buildSampleModel(): UiModel {
 }
 
 export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "context"): UiModel {
+  const traces = pack.trace ?? [];
   const patchesByMod = groupBy(pack.scan.xmlPatches, (patch) => patch.modName);
   const patchesByFile = groupBy(pack.scan.xmlPatches, (patch) => patch.file);
-  const conflictsByFile = groupBy(pack.conflicts, (conflict) => conflict.file);
+  const tracesByFile = groupBy(traces, (item) => item.file);
   const rootsByMod = groupBy(pack.scan.enabledMods, (mod) => mod.mo2Name);
   const seenRoots = new Set<string>();
   const mods = pack.scan.entries
     .filter((entry) => entry.state !== "separator")
     .flatMap((entry, index) => {
       const sortOrder = index;
-      if (entry.state === "disabled") {
-        return [entryToMod(entry.name, false, entry.order ?? -1, sortOrder, entry.line, "disabled in modlist")];
-      }
-
+      if (entry.state === "disabled") return [entryToMod(entry.name, false, entry.order ?? -1, sortOrder, entry.line, "disabled in modlist")];
       const roots = rootsByMod.get(entry.name) ?? [];
-      if (roots.length === 0) {
-        return [entryToMod(entry.name, true, entry.order ?? sortOrder, sortOrder, entry.line, "enabled in modlist, but folder or ModInfo.xml was not found", true)];
-      }
-
-      for (const mod of roots) {
-        seenRoots.add(rootKey(mod));
-      }
+      if (roots.length === 0) return [entryToMod(entry.name, true, entry.order ?? sortOrder, sortOrder, entry.line, "enabled in modlist, but folder or ModInfo.xml was not found", true)];
+      roots.forEach((mod) => seenRoots.add(rootKey(mod)));
       return [rootToMod(roots[0], patchesByMod.get(entry.name) ?? [], sortOrder, entry.line)];
     });
 
   for (const mod of pack.scan.enabledMods) {
-    if (!seenRoots.has(rootKey(mod))) {
-      mods.push(rootToMod(mod, patchesByMod.get(mod.mo2Name) ?? [], pack.scan.entries.length + mods.length, undefined));
-    }
+    if (!seenRoots.has(rootKey(mod))) mods.push(rootToMod(mod, patchesByMod.get(mod.mo2Name) ?? [], pack.scan.entries.length + mods.length, undefined));
   }
   mods.sort((a, b) => a.sortOrder - b.sortOrder || a.order - b.order || a.folder.localeCompare(b.folder));
 
   const xmlFiles: UiXmlFile[] = [...patchesByFile.entries()].map(([file, patches]) => {
-    const conflicts = conflictsByFile.get(file) ?? [];
+    const fileTraces = tracesByFile.get(file) ?? [];
+    const diagnosticCount = fileTraces.filter((item) => item.diagnosticKind !== "ok").length;
+    const missCount = fileTraces.filter((item) => /miss/.test(item.diagnosticKind)).length;
     return {
       path: file,
       patches: patches.length,
       touchingMods: [...new Set(patches.map((patch) => patch.modName))].sort(),
-      conflicts: conflicts.length,
-      missing: countMissing(pack, file),
-      risk: riskFor(conflicts.length, countMissing(pack, file))
+      conflicts: diagnosticCount,
+      missing: missCount,
+      risk: riskForDiagnostics(fileTraces)
     };
-  }).sort((a, b) => b.conflicts - a.conflicts || b.patches - a.patches || a.path.localeCompare(b.path));
+  }).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || b.conflicts - a.conflicts || b.patches - a.patches || a.path.localeCompare(b.path));
 
-  const sortedConflictGroups = [...pack.conflicts].sort(compareConflictGroupsForReview);
-  const reviewRows = buildReviewRows(sortedConflictGroups);
-  const conflicts = reviewRows.map((row, index) => {
-    const modsInvolved = [...new Set(row.operations.map((operation) => operation.modName))];
-    return {
-      id: `c${index + 1}`,
-      file: row.file,
-      node: row.xpath,
-      category: row.category,
-      finalKind: row.finalKind,
-      kind: row.kind,
-      risk: row.risk,
-      mods: modsInvolved,
-      final: row.final,
-      summary: `${modsInvolved.join(" -> ")} touch ${row.xpath}. ${row.finalKind === "candidate" ? "Candidate" : "Final"} is ${row.final}.`
-    };
-  });
+  const rows = buildReviewRows(traces);
+  const conflicts = rows.map((row, index) => ({
+    id: `c${index + 1}`,
+    file: row.file,
+    node: row.xpath,
+    category: row.category,
+    finalKind: row.finalKind,
+    kind: row.kind,
+    risk: row.risk,
+    mods: [...new Set(row.history.map((history) => history.mod))],
+    final: row.final,
+    summary: row.note
+  }));
 
-  const xmlTree = buildTree(reviewRows);
-  const conflictCounts = countConflictCategories(conflicts.map((conflict) => conflict.category));
-  const totalConflictOps = new Set(pack.conflicts.flatMap((conflict) => conflict.operations.map((operation) => `${operation.file}\0${operation.xpath}\0${operation.modName}\0${operation.line}`))).size;
   return {
     source,
     generatedAt: pack.generatedAt,
@@ -180,7 +134,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
     profile: pack.scan.profile,
     mods,
     xmlFiles,
-    xmlTree,
+    xmlTree: buildTree(rows),
     conflicts,
     stats: {
       modsLoaded: mods.length,
@@ -188,65 +142,18 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
       xmlFiles: xmlFiles.length,
       totalPatches: pack.scan.xmlPatches.length,
       warnings: pack.scan.warnings.length + pack.logs.warnings.length,
-      conflicts: pack.conflicts.length,
-      missingXPath: pack.scan.warnings.filter((warning) => /xpath|missing/i.test(`${warning.kind} ${warning.message}`)).length,
-      loadOrderDependent: conflicts.filter((conflict) => conflict.kind === "load-order-dependent").length,
-      safeChanges: Math.max(0, pack.scan.xmlPatches.length - totalConflictOps)
+      conflicts: traces.filter((item) => item.diagnosticKind !== "ok").length,
+      missingXPath: traces.filter((item) => /miss/.test(item.diagnosticKind)).length,
+      loadOrderDependent: traces.filter((item) => item.diagnosticKind === "order-induced-miss" || item.diagnosticKind === "dependency-order-miss").length,
+      safeChanges: traces.filter((item) => item.diagnosticKind === "ok").length
     },
-    conflictCounts
+    conflictCounts: countConflictCategories(rows.map((row) => row.category))
   };
-}
-
-function rootToMod(mod: ContextPack["scan"]["enabledMods"][number], patches: ContextPack["scan"]["xmlPatches"], sortOrder: number, modlistLine: number | undefined) {
-  const files = [...new Set(patches.map((patch) => patch.file))].sort((a, b) => a.localeCompare(b));
-  return {
-    id: mod.mo2Name,
-    folder: mod.mo2Name,
-    name: mod.displayName || mod.mo2Name,
-    author: mod.author ?? "unknown",
-    version: mod.version ?? "unknown",
-    enabled: true,
-    order: mod.order,
-    sortOrder,
-    modlistLine,
-    description: mod.rootPath || "diagnostic only",
-    files,
-    patchCount: patches.length,
-    isCore: /harmony|score|tfp/i.test(mod.mo2Name),
-    isUser: /^z{2,}|waka|tweaks/i.test(mod.mo2Name),
-    missing: false
-  };
-}
-
-function entryToMod(name: string, enabled: boolean, order: number, sortOrder: number, modlistLine: number, description: string, missing = false) {
-  return {
-    id: name,
-    folder: name,
-    name,
-    author: "unknown",
-    version: "unknown",
-    enabled,
-    order,
-    sortOrder,
-    modlistLine,
-    description,
-    files: [],
-    patchCount: 0,
-    isCore: /harmony|score|tfp/i.test(name),
-    isUser: /^z{2,}|waka|tweaks/i.test(name),
-    missing
-  };
-}
-
-function rootKey(mod: ContextPack["scan"]["enabledMods"][number]): string {
-  return `${mod.mo2Name}\0${mod.rootPath}`;
 }
 
 interface ReviewRow {
-  source: ConflictGroup;
   file: string;
   xpath: string;
-  operations: XmlPatchOperation[];
   category: ConflictCategory;
   kind: ConflictKind;
   risk: Risk;
@@ -258,88 +165,104 @@ interface ReviewRow {
   note: string;
 }
 
-function buildReviewRows(groups: ConflictGroup[]): ReviewRow[] {
+function buildReviewRows(traces: PatchTrace[]): ReviewRow[] {
   const rows: ReviewRow[] = [];
-  for (const group of groups) {
-    rows.push(...valueCandidateRows(group));
-    const structural = structuralRow(group);
-    if (structural) rows.push(structural);
-  }
-  return rows.sort(compareReviewRows);
-}
-
-function valueCandidateRows(group: ConflictGroup): ReviewRow[] {
-  const byExactXpath = group.operations.filter(isValueCandidateOperation).reduce<Map<string, XmlPatchOperation[]>>((acc, operation) => {
-    const current = acc.get(operation.xpath) ?? [];
-    current.push(operation);
-    acc.set(operation.xpath, current);
-    return acc;
-  }, new Map());
-
-  const rows: ReviewRow[] = [];
-  for (const [xpath, operations] of byExactXpath.entries()) {
-    if (operations.length === 0) continue;
-    operations.sort(compareOperations);
-    const historySteps = matchingHistory(group, xpath);
-    const history = historySteps.length > 0
-      ? historySteps.map(historyStepToUi)
-      : operations.map(operationToCandidateHistory);
-    const allApplied = historySteps.length > 0 && historySteps.every((step) => step.status === "applied");
-    const resolvedFinal = allApplied ? lastDefined(historySteps.map((step) => step.afterValue)) : undefined;
-    const winner = operations[operations.length - 1];
-    const candidateFinal = winner.valueSummary ?? winner.valueText ?? null;
-    const finalKind = group.resolution?.status === "resolved" && resolvedFinal != null ? "final" : "candidate";
-    const category = classifyConflictCategory(group);
+  const replayed = traces.filter((item) => item.status !== "partial");
+  const scalar = replayed.filter((item) => item.effects.some((effect) => isScalarEffect(effect.kind)) || item.diagnosticKind.includes("miss") || isRealUnsupportedDiagnostic(item));
+  for (const [targetKey, targetTraces] of groupBy(scalar, (item) => scalarTarget(item)).entries()) {
+    const sorted = [...targetTraces].sort(compareTrace);
+    const last = [...sorted].reverse().find((item) => item.effects.some((effect) => isScalarEffect(effect.kind)));
+    const firstEffect = sorted.flatMap((item) => item.effects).find((effect) => isScalarEffect(effect.kind));
+    const finalEffect = last?.effects.find((effect) => isScalarEffect(effect.kind));
+    const kind = worstKind(sorted);
     rows.push({
-      source: group,
-      file: group.file,
-      xpath,
-      operations,
+      file: sorted[0].file,
+      xpath: targetKey,
       category: "value",
-      kind: operations.length > 2 ? "load-order-dependent" : "direct-overwrite",
-      risk: finalKind === "final" ? riskForKind(operations.length > 2 ? "load-order-dependent" : "direct-overwrite", group) : category === "mixed" ? "warn" : "info",
-      final: finalKind === "final" ? resolvedFinal ?? candidateFinal : candidateFinal,
-      finalKind,
-      vanilla: group.resolution?.status === "resolved" ? group.resolution.vanillaValue ?? null : null,
-      history,
-      winner: finalKind === "final" ? group.resolution?.finalSource ?? winner.modName : winner.modName,
-      note: finalKind === "candidate"
-        ? category === "mixed"
-          ? "This is an individual value candidate extracted from a mixed conflict. Structural resolution is still unresolved; treat the shown final as load-order candidate only."
-          : "No complete resolution history is available for this exact value. Candidate final is the last authored value by load order."
-        : "Final value comes from the resolver history for this exact value target."
+      kind,
+      risk: conflictKinds[kind].risk,
+      final: finalEffect?.after ?? finalEffect?.value ?? null,
+      finalKind: "final",
+      vanilla: firstEffect?.before ?? null,
+      history: sorted.map(traceToHistory),
+      winner: last?.modName ?? sorted[sorted.length - 1].modName,
+      note: explainTraceGroup(sorted)
     });
   }
-  return rows;
+
+  const structural = replayed.filter((item) => item.effects.some((effect) => isStructuralEffect(effect.kind)));
+  for (const item of structural) {
+    const kind = item.effects.some((effect) => effect.kind === "removeNode") ? "structural-mask" : item.diagnosticKind;
+    rows.push({
+      file: item.file,
+      xpath: item.affectedTargets[0]?.canonical ?? item.xpath,
+      category: "structural",
+      kind,
+      risk: conflictKinds[kind].risk,
+      final: item.effects.map((effect) => effect.summary ?? effect.kind).join(", ") || item.status,
+      finalKind: "status",
+      vanilla: null,
+      history: [traceToHistory(item)],
+      winner: item.modName,
+      note: `${item.operation} by ${item.modName}: ${item.effects.map((effect) => effect.target).join(", ") || item.xpath}`
+    });
+  }
+  return rows.sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
 }
 
-function structuralRow(group: ConflictGroup): ReviewRow | null {
-  const structuralOperations = group.operations.filter(isStructuralOperation);
-  if (structuralOperations.length === 0) return null;
-  const kind = inferKind({ ...group, operations: structuralOperations });
-  const final = structuralStatus(group);
+function traceToHistory(item: PatchTrace): UiAttr["history"][number] {
+  const effect = item.effects[0];
   return {
-    source: group,
-    file: group.file,
-    xpath: group.normalizedXpath,
-    operations: structuralOperations,
-    category: "structural",
-    kind,
-    risk: riskForKind(kind, group),
-    final,
-    finalKind: "status",
-    vanilla: null,
-    history: structuralOperations.sort(compareOperations).map(operationToCandidateHistory),
-    winner: group.winner?.modName,
-    note: group.resolution?.warnings?.length
-      ? `Resolution warning: ${group.resolution.warnings[0]}`
-      : "Structural conflict: review append, remove, and insert operations here. Scalar value candidates are shown separately in Values."
+    mod: item.modName,
+    order: item.order,
+    op: item.operation,
+    value: formatEffect(effect),
+    before: effect?.before,
+    authored: effect?.value ?? effect?.summary,
+    after: effect?.after,
+    error: item.status === "applied" || item.status === "ambiguous" ? undefined : item.message ?? conflictKinds[item.diagnosticKind].label
   };
+}
+
+function formatEffect(effect: PatchTrace["effects"][number] | undefined): string {
+  if (!effect) return "(unknown)";
+  if (effect.before != null || effect.after != null) return `${effect.before ?? "(missing)"} -> ${effect.after ?? "(missing)"}`;
+  return effect.value ?? effect.summary ?? effect.kind;
+}
+
+function scalarTarget(item: PatchTrace): string {
+  const effect = item.effects.find((candidate) => isScalarEffect(candidate.kind));
+  if (effect) return effect.target;
+  return item.affectedTargets[0]?.canonical ?? item.xpath;
+}
+
+function isScalarEffect(kind: string): boolean {
+  return kind === "setValue" || kind === "setAttribute" || kind === "removeAttribute" || kind === "appendAttributeText" || kind === "miss" || kind === "unsupported";
+}
+
+function isStructuralEffect(kind: string): boolean {
+  return kind === "appendChild" || kind === "removeNode" || kind === "insertBefore" || kind === "insertAfter";
+}
+
+function isRealUnsupportedDiagnostic(item: PatchTrace): boolean {
+  return item.diagnosticKind === "unsupported-operation" && item.status !== "partial" && !/budget exceeded/i.test(item.message ?? item.effects[0]?.summary ?? "");
+}
+
+function worstKind(items: PatchTrace[]): ConflictKind {
+  return [...items].map((item) => item.diagnosticKind).sort((a, b) => riskRank(conflictKinds[b].risk) - riskRank(conflictKinds[a].risk))[0] ?? "ok";
+}
+
+function explainTraceGroup(items: PatchTrace[]): string {
+  const kind = worstKind(items);
+  if (kind === "silent-overwrite") return "Later load-order writes hide earlier values on this canonical target.";
+  if (kind.includes("miss")) return "At least one XPath did not match during replay.";
+  if (kind === "unsupported-operation") return "This operation is visible in inventory but not replayed in v0.2.";
+  return "Final value comes from replaying writes in load order.";
 }
 
 function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
   const byFile = new Map<string, UiNode[]>();
-  for (const [index, row] of rows.entries()) {
+  rows.slice(0, 160).forEach((row, index) => {
     const attr: UiAttr = {
       conflictId: `c${index + 1}`,
       name: targetName(row.xpath),
@@ -355,174 +278,45 @@ function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
       note: row.note
     };
     const nodePath = parentPath(row.xpath);
-    const node: UiNode = {
-      path: nodePath,
-      label: `<${nodePath || row.xpath}>`,
-      risk: attr.risk,
-      attrs: [attr]
-    };
-    const fileNodes = byFile.get(row.file) ?? [];
-    fileNodes.push(node);
-    byFile.set(row.file, fileNodes);
-    if (index > 80) break;
-  }
+    const node = { path: nodePath, label: `<${nodePath || row.xpath}>`, risk: attr.risk, attrs: [attr] };
+    const list = byFile.get(row.file) ?? [];
+    list.push(node);
+    byFile.set(row.file, list);
+  });
   return Object.fromEntries([...byFile.entries()].map(([file, children]) => [file, { children }]));
 }
 
-function inferKind(group: ConflictGroup): ConflictKind {
-  if (!group.exact) return "same-node-multi-touch";
-  if (group.operations.some((operation) => /remove|insert|append/i.test(operation.operation))) return "structural-dependency";
-  if (group.operations.length > 2) return "load-order-dependent";
-  return "direct-overwrite";
+function rootToMod(mod: ContextPack["scan"]["enabledMods"][number], patches: ContextPack["scan"]["xmlPatches"], sortOrder: number, modlistLine: number | undefined) {
+  const files = [...new Set(patches.map((patch) => patch.file))].sort((a, b) => a.localeCompare(b));
+  return { id: mod.mo2Name, folder: mod.mo2Name, name: mod.displayName || mod.mo2Name, author: mod.author ?? "unknown", version: mod.version ?? "unknown", enabled: true, order: mod.order, sortOrder, modlistLine, description: mod.rootPath || "diagnostic only", files, patchCount: patches.length, isCore: /harmony|score|tfp/i.test(mod.mo2Name), isUser: /^z{2,}|waka|tweaks/i.test(mod.mo2Name), missing: false };
 }
 
-function classifyConflictCategory(group: ConflictGroup): ConflictCategory {
-  const hasStructural = group.operations.some(isStructuralOperation);
-  const hasValue = group.operations.some(isValueOperation);
-  if (hasStructural && hasValue) return "mixed";
-  if (hasStructural) return "structural";
-  return "value";
+function entryToMod(name: string, enabled: boolean, order: number, sortOrder: number, modlistLine: number, description: string, missing = false) {
+  return { id: name, folder: name, name, author: "unknown", version: "unknown", enabled, order, sortOrder, modlistLine, description, files: [], patchCount: 0, isCore: /harmony|score|tfp/i.test(name), isUser: /^z{2,}|waka|tweaks/i.test(name), missing };
 }
 
-function isValueOperation(operation: ConflictGroup["operations"][number]): boolean {
-  if (/^set$/i.test(operation.operation)) return true;
-  if (/\/@[\w.-]+$/i.test(operation.xpath)) return true;
-  if (/(EconomicValue|Price|Count|Damage|Range|Duration|value)/i.test(operation.xpath)) return true;
-  if (operation.valueKind === "text") return true;
-  return looksNumeric(operation.valueText);
+function rootKey(mod: ContextPack["scan"]["enabledMods"][number]): string {
+  return `${mod.mo2Name}\0${mod.rootPath}`;
 }
 
-function isValueCandidateOperation(operation: XmlPatchOperation): boolean {
-  if (operation.valueKind === "xml") return false;
-  if (isStructuralOperation(operation)) return false;
-  if (/^set$/i.test(operation.operation)) return true;
-  if (/\/@[\w.-]+$/i.test(operation.xpath)) return true;
-  if (looksNumeric(operation.valueText)) return true;
-  return operation.valueKind === "text" && (operation.valueText?.length ?? 0) <= 160 && !/[<>]/.test(operation.valueText ?? "");
+function riskForDiagnostics(traces: PatchTrace[]): Risk {
+  return traces.map((item) => conflictKinds[item.diagnosticKind].risk).sort((a, b) => riskRank(b) - riskRank(a))[0] ?? "safe";
 }
 
-function isStructuralOperation(operation: XmlPatchOperation): boolean {
-  return /^(append|insertBefore|insertAfter|remove)$/i.test(operation.operation);
-}
-
-function riskForKind(kind: ConflictKind, group: ConflictGroup): Risk {
-  if (group.resolution?.status === "unresolved") return "critical";
-  if (kind === "structural-dependency") return "warn";
-  if (kind === "load-order-dependent") return "info";
-  if (!group.exact) return "info";
-  return "danger";
-}
-
-function historyStepToUi(step: ConflictResolutionStep): UiAttr["history"][number] {
-  return {
-    mod: step.modName,
-    order: step.order,
-    op: step.operation,
-    value: formatHistoryValue(step.beforeValue, step.afterValue, step.authoredValue),
-    before: step.beforeValue,
-    authored: step.authoredValue,
-    after: step.afterValue,
-    error: step.status === "unresolved" ? step.warning ?? "unresolved" : undefined
-  };
-}
-
-function operationToCandidateHistory(operation: XmlPatchOperation): UiAttr["history"][number] {
-  const value = operation.valueSummary ?? operation.valueText;
-  return {
-    mod: operation.modName,
-    order: operation.order,
-    op: operation.operation,
-    value: value ?? "(unknown)",
-    authored: value
-  };
-}
-
-function formatHistoryValue(before?: string, after?: string, authored?: string): string {
-  if (before != null || after != null) {
-    return `${before ?? "(missing)"} -> ${after ?? "(missing)"}`;
-  }
-  return authored ?? "unresolved";
-}
-
-function structuralStatus(group: ConflictGroup): string {
-  if (group.resolution?.status === "resolved") return "resolved";
-  return "unresolved";
-}
-
-function compareConflictGroupsForReview(a: ConflictGroup, b: ConflictGroup): number {
-  return reviewScore(b) - reviewScore(a) || a.file.localeCompare(b.file) || a.normalizedXpath.localeCompare(b.normalizedXpath);
-}
-
-function reviewScore(group: ConflictGroup): number {
-  let score = 0;
-  if (/\/@[\w.-]+$/.test(group.winner.xpath)) score += 80;
-  if (/\/@value$/i.test(group.winner.xpath)) score += 40;
-  if (group.operations.every((operation) => operation.operation === "set")) score += 35;
-  if (group.operations.some((operation) => looksNumeric(operation.valueText))) score += 25;
-  if (group.exact) score += 10;
-  if (group.resolution?.status === "resolved") score += 10;
-  if (group.operations.some((operation) => /append|insert|remove/i.test(operation.operation))) score -= 60;
-  if (/^\/[^/]+$/.test(group.normalizedXpath)) score -= 50;
-  return score;
-}
-
-function compareReviewRows(a: ReviewRow, b: ReviewRow): number {
-  return rowScore(b) - rowScore(a) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath);
-}
-
-function rowScore(row: ReviewRow): number {
-  let score = 0;
-  if (row.category === "value") score += 120;
-  if (row.finalKind === "candidate" && row.final != null) score += 35;
-  if (row.finalKind === "final") score += 25;
-  if (/\/@value$/i.test(row.xpath)) score += 20;
-  if (row.operations.some((operation) => looksNumeric(operation.valueText))) score += 15;
-  if (row.category === "structural") score -= 80;
-  return score;
-}
-
-function compareOperations(a: XmlPatchOperation, b: XmlPatchOperation): number {
-  return a.order - b.order || a.line - b.line || a.modName.localeCompare(b.modName);
-}
-
-function matchingHistory(group: ConflictGroup, xpath: string): ConflictResolutionStep[] {
-  return (group.resolution?.history ?? []).filter((step) => step.xpath === xpath && /^set$/i.test(step.operation));
-}
-
-function lastDefined<T>(values: Array<T | undefined>): T | undefined {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (values[index] != null) return values[index];
-  }
-  return undefined;
-}
-
-function looksNumeric(value: string | undefined): boolean {
-  return value != null && /^-?\d+(?:\.\d+)?$/.test(value.trim());
+function riskRank(risk: Risk): number {
+  return { safe: 0, info: 1, warn: 2, danger: 3, critical: 4 }[risk];
 }
 
 function countConflictCategories(categories: ConflictCategory[]): Record<ConflictCategory, number> {
-  return {
-    value: categories.filter((category) => category === "value").length,
-    structural: categories.filter((category) => category === "structural").length,
-    mixed: categories.filter((category) => category === "mixed").length
-  };
+  return { value: categories.filter((category) => category === "value").length, structural: categories.filter((category) => category === "structural").length, mixed: categories.filter((category) => category === "mixed").length };
 }
 
-function riskFor(conflicts: number, missing: number): Risk {
-  if (missing > 0) return "critical";
-  if (conflicts >= 8) return "danger";
-  if (conflicts >= 3) return "warn";
-  if (conflicts > 0) return "info";
-  return "safe";
-}
-
-function countMissing(pack: ContextPack, file: string): number {
-  return pack.scan.warnings.filter((warning) => warning.path?.includes(file) && /xpath|missing/i.test(`${warning.kind} ${warning.message}`)).length;
+function compareTrace(a: PatchTrace, b: PatchTrace): number {
+  return a.order - b.order || a.line - b.line || a.modName.localeCompare(b.modName);
 }
 
 function targetName(xpath: string): string {
-  const parts = xpath.split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? xpath;
+  return xpath.split("/").filter(Boolean).pop() ?? xpath;
 }
 
 function parentPath(xpath: string): string {

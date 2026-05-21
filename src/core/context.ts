@@ -2,25 +2,25 @@ import path from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { ContextPack } from "./types.js";
 import { scanMo2 } from "./scanner.js";
-import { detectConflicts } from "./conflicts.js";
 import { scanLatestClientLog } from "./logs.js";
-import { defaultGameInstallPath, ResolveOptions, resolveConflicts } from "./resolution.js";
+import { buildPatchTrace, defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
 
 export async function buildContextPack(
   mo2Path: string,
   profile: string,
   gamePath = defaultGameInstallPath(),
-  resolveOptions: ResolveOptions = {}
+  traceOptions: TraceOptions = {}
 ): Promise<ContextPack> {
   const scan = await scanMo2(mo2Path, profile);
-  const resolution = await resolveConflicts(detectConflicts(scan.xmlPatches), scan.xmlPatches, gamePath, resolveOptions);
+  const replay = await buildPatchTrace(scan.xmlPatches, gamePath, traceOptions);
   return {
     generatedAt: new Date().toISOString(),
     scan: {
       ...scan,
-      warnings: [...scan.warnings, ...resolution.warnings]
+      warnings: [...scan.warnings, ...replay.warnings]
     },
-    conflicts: resolution.conflicts,
+    trace: replay.trace,
+    conflicts: [],
     logs: await scanLatestClientLog(undefined, scan.enabledMods)
   };
 }

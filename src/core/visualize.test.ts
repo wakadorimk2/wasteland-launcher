@@ -122,6 +122,7 @@ function fixturePack(): ContextPack {
       ],
       warnings: []
     },
+    trace: [],
     conflicts: [
       {
         file: "items.xml",

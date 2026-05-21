@@ -1,5 +1,5 @@
 export type Risk = "safe" | "info" | "warn" | "danger" | "critical";
-export type ConflictKind = "direct-overwrite" | "same-node-multi-touch" | "structural-dependency" | "missing-xpath" | "load-order-dependent" | "single-winner";
+export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ok";
 export type ConflictCategory = "value" | "structural" | "mixed";
 export type LayoutMode = "3-column" | "unified" | "timeline";
 export type ViewId = "dashboard" | "load-order" | "xml-browser" | "conflict" | "settings";
@@ -31,31 +31,45 @@ export interface XmlPatchOperation {
   operation: string;
   xpath: string;
   line: number;
+  attributes?: Record<string, string>;
   valueKind?: "text" | "xml" | "target" | "empty" | "unknown";
   valueText?: string;
   valueSummary?: string;
 }
 
-export interface ConflictResolutionStep {
+export interface PatchTraceTarget {
+  canonical: string;
+  nodeRef: string;
+  kind: "element" | "attribute";
+  value?: string;
+}
+
+export interface PatchTraceEffect {
+  kind: string;
+  target: string;
+  before?: string;
+  after?: string;
+  value?: string;
+  summary?: string;
+}
+
+export interface PatchTrace {
+  id: string;
   modName: string;
   displayName: string;
   order: number;
+  file: string;
+  path: string;
+  line: number;
   operation: string;
   xpath: string;
-  beforeValue?: string;
-  authoredValue?: string;
-  afterValue?: string;
-  status: "applied" | "unresolved";
-  warning?: string;
-}
-
-export interface ConflictResolution {
-  status: "resolved" | "unresolved";
-  vanillaValue?: string;
-  finalValue?: string;
-  finalSource?: string;
-  history: ConflictResolutionStep[];
-  warnings: string[];
+  status: "applied" | "missed" | "unsupported" | "parseError" | "ambiguous" | "partial";
+  matchCountBefore: number;
+  affectedTargets: PatchTraceTarget[];
+  effects: PatchTraceEffect[];
+  confidence: "high" | "medium" | "low";
+  diagnosticKind: ConflictKind;
+  message?: string;
 }
 
 export interface ConflictGroup {
@@ -64,7 +78,6 @@ export interface ConflictGroup {
   operations: XmlPatchOperation[];
   winner: XmlPatchOperation;
   exact: boolean;
-  resolution?: ConflictResolution;
 }
 
 export interface ContextPack {
@@ -80,6 +93,7 @@ export interface ContextPack {
     dlls: unknown[];
     warnings: { kind: string; message: string; modName?: string; path?: string }[];
   };
+  trace: PatchTrace[];
   conflicts: ConflictGroup[];
   logs: {
     latestLogPath?: string;

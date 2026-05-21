@@ -122,13 +122,17 @@ button:disabled { cursor: not-allowed; opacity: 0.56; }
   content: attr(data-badge);
   position: absolute;
   top: -2px;
-  right: -2px;
+  right: -5px;
   background: var(--risk-danger);
   color: #0d1117;
   font: 700 9px var(--font-mono);
   border-radius: 8px;
   min-width: 14px;
-  padding: 1px 4px;
+  max-width: 28px;
+  padding: 1px 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ico { font-family: var(--font-mono); font-weight: 700; }
 .spacer { flex: 1; }
@@ -150,7 +154,13 @@ button:disabled { cursor: not-allowed; opacity: 0.56; }
   display: flex;
   justify-content: space-between;
 }
-.sidebar-section { padding: 4px 0 12px; overflow: auto; }
+.sidebar-section { padding: 4px 0 12px; flex: 0 0 auto; overflow: visible; }
+.sidebar-section.mods-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 16px;
+}
 .sidebar-section-title {
   padding: 4px 12px;
   font-size: 10px;

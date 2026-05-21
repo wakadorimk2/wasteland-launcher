@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { ConflictGroup, ContextPack, LogWarning } from "./types.js";
+import { ConflictGroup, ContextPack, LogWarning, PatchTrace } from "./types.js";
 import { buildAnalyzerUiModel, renderAnalyzerHtml } from "./analyzer-ui.js";
 
 export interface RankedConflict {
@@ -48,8 +48,10 @@ export async function writeHtmlReport(filePath: string, html: string): Promise<v
 }
 
 export function renderVisualization(pack: ContextPack): string {
-  const rankedConflicts = rankConflicts(pack.conflicts);
-  return renderAnalyzerHtml(buildAnalyzerUiModel({ pack, rankedConflicts }));
+  const conflicts = pack.conflicts.length > 0 ? pack.conflicts : conflictGroupsFromTrace(pack.trace ?? [], pack.scan.xmlPatches);
+  const derivedPack = { ...pack, conflicts };
+  const rankedConflicts = rankConflicts(conflicts);
+  return renderAnalyzerHtml(buildAnalyzerUiModel({ pack: derivedPack, rankedConflicts }));
 }
 
 export function buildTreemapItems(conflicts: RankedConflict[]): TreemapItem[] {
@@ -175,4 +177,39 @@ function higherPriority(a: RankedConflict["priority"], b: RankedConflict["priori
 
 function slugId(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "item";
+}
+
+function conflictGroupsFromTrace(trace: PatchTrace[], operations: ContextPack["scan"]["xmlPatches"]): ConflictGroup[] {
+  const byOperation = new Map(operations.map((operation) => [operationKey(operation), operation]));
+  const groups = new Map<string, ConflictGroup>();
+  for (const item of trace) {
+    if (item.diagnosticKind === "ok") continue;
+    const operation = byOperation.get(operationKey(item)) ?? {
+      modName: item.modName,
+      displayName: item.displayName,
+      order: item.order,
+      file: item.file,
+      path: item.path,
+      operation: item.operation,
+      xpath: item.xpath,
+      line: item.line
+    };
+    const key = `${item.file}\0${item.affectedTargets[0]?.canonical ?? item.xpath}`;
+    const current = groups.get(key) ?? {
+      file: item.file,
+      normalizedXpath: item.affectedTargets[0]?.canonical ?? item.xpath,
+      operations: [],
+      winner: operation,
+      exact: item.matchCountBefore <= 1
+    };
+    current.operations.push(operation);
+    current.winner = operation.order >= current.winner.order ? operation : current.winner;
+    current.exact = current.exact && item.matchCountBefore <= 1;
+    groups.set(key, current);
+  }
+  return [...groups.values()];
+}
+
+function operationKey(operation: Pick<ContextPack["scan"]["xmlPatches"][number], "file" | "order" | "line" | "operation" | "xpath">): string {
+  return `${operation.file}\0${operation.order}\0${operation.line}\0${operation.operation}\0${operation.xpath}`;
 }

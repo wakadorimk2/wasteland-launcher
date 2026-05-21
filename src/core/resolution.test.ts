@@ -3,131 +3,110 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { detectConflicts } from "./conflicts.js";
-import { resolveConflicts } from "./resolution.js";
+import { buildPatchTrace } from "./patchTrace.js";
 import { XmlPatchOperation } from "./types.js";
 
-test("resolves set authored value and final attribute value", async () => {
+test("replay trace normalizes set and setattribute to the same attribute target", async () => {
   const fixture = await makeGameFixture("items.xml", `<items><item name="coin"><property name="count" value="10"/></item></items>`);
   try {
     const operations = [
       op("A", 1, "items.xml", "/items/item[@name='coin']/property[@name='count']/@value", "set", "120"),
-      op("B", 2, "items.xml", "/items/item[@name='coin']/property[@name='count']/@value", "set", "160")
+      op("B", 2, "items.xml", "/items/item[@name='coin']/property[@name='count']", "setattribute", "160", "text", "160", { name: "value", value: "160" })
     ];
 
-    const { conflicts, warnings } = await resolveConflicts(detectConflicts(operations), operations, fixture.gamePath);
+    const { trace, warnings } = await buildPatchTrace(operations, fixture.gamePath);
 
-    assert.equal(warnings.length, 0);
-    assert.equal(conflicts.length, 1);
-    assert.equal(conflicts[0].operations[1].valueText, "160");
-    assert.equal(conflicts[0].resolution?.vanillaValue, "10");
-    assert.equal(conflicts[0].resolution?.history[1].authoredValue, "160");
-    assert.equal(conflicts[0].resolution?.history[1].beforeValue, "120");
-    assert.equal(conflicts[0].resolution?.history[1].afterValue, "160");
-    assert.equal(conflicts[0].resolution?.finalValue, "160");
+    assert.equal(warnings.filter((warning) => warning.kind.includes("miss")).length, 0);
+    assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/property[@name='count']/@value");
+    assert.equal(trace[0].effects[0].after, "120");
+    assert.equal(trace[1].effects[0].target, trace[0].effects[0].target);
+    assert.equal(trace[1].effects[0].before, "120");
+    assert.equal(trace[1].effects[0].after, "160");
+    assert.equal(trace[1].diagnosticKind, "silent-overwrite");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("applies append, insertBefore, insertAfter, and remove in load order", async () => {
-  const fixture = await makeGameFixture("items.xml", `<items><item name="base"/><item name="old"/></items>`);
+test("removeattribute emits an attribute deletion effect", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" tags="money"/></items>`);
   try {
-    const operations = [
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='coin']", "removeattribute", undefined, "target", "remove tags", { name: "tags" })
+    ], fixture.gamePath);
+
+    assert.equal(trace[0].status, "applied");
+    assert.equal(trace[0].effects[0].kind, "removeAttribute");
+    assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/@tags");
+    assert.equal(trace[0].effects[0].before, "money");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("append handles element and attribute targets", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" tags="money"/></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
       op("A", 1, "items.xml", "/items", "append", `<item name="tail"/>`, "xml", "<item tail>"),
-      op("B", 2, "items.xml", "/items/item[@name='tail']", "insertBefore", `<item name="beforeTail"/>`, "xml", "<item beforeTail>"),
-      op("C", 3, "items.xml", "/items/item[@name='tail']", "insertAfter", `<item name="afterTail"/>`, "xml", "<item afterTail>"),
-      op("D", 4, "items.xml", "/items/item[@name='old']", "remove", undefined, "target", "remove target"),
-      op("E", 5, "items.xml", "/items", "append", `<item name="final"/>`, "xml", "<item final>")
-    ];
+      op("B", 2, "items.xml", "/items/item[@name='coin']/@tags", "append", ",quest", "text", ",quest")
+    ], fixture.gamePath);
 
-    const conflicts = detectConflicts(operations.filter((operation) => operation.operation === "append"));
-    const { conflicts: resolved, warnings } = await resolveConflicts(conflicts, operations, fixture.gamePath);
-
-    assert.equal(warnings.length, 0);
-    assert.equal(resolved[0].resolution?.status, "resolved");
-    assert.match(resolved[0].resolution?.finalValue ?? "", /beforeTail/);
-    assert.match(resolved[0].resolution?.finalValue ?? "", /afterTail/);
-    assert.match(resolved[0].resolution?.finalValue ?? "", /final/);
-    assert.doesNotMatch(resolved[0].resolution?.finalValue ?? "", /old/);
-    assert.equal(resolved[0].resolution?.history[0].authoredValue, "<item tail>");
+    assert.equal(trace[0].effects[0].kind, "appendChild");
+    assert.equal(trace[0].effects[0].target, "/items");
+    assert.equal(trace[1].effects[0].kind, "appendAttributeText");
+    assert.equal(trace[1].effects[0].before, "money");
+    assert.equal(trace[1].effects[0].after, "money,quest");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("resolves contains and multiple predicate XPath expressions", async () => {
-  const fixture = await makeGameFixture("items.xml", `<items><item name="gunPipePistol"><property name="Tags" value="weapon,pipe"/><property name="count" value="1"/></item></items>`);
+test("remove followed by a later XPath reference becomes order-induced-miss", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old"><property name="value" value="1"/></item></items>`);
   try {
-    const operations = [
-      op("A", 1, "items.xml", `//item[contains(@name,'Pipe') and property[@name='Tags']]/property[@name='count']/@value`, "set", "2"),
-      op("B", 2, "items.xml", `//item[contains(@name,'Pipe') and property[@name='Tags']]/property[@name='count']/@value`, "set", "3")
-    ];
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='old']", "remove"),
+      op("B", 2, "items.xml", "/items/item[@name='old']/property[@name='value']/@value", "set", "2")
+    ], fixture.gamePath);
 
-    const { conflicts, warnings } = await resolveConflicts(detectConflicts(operations), operations, fixture.gamePath);
-
-    assert.equal(warnings.length, 0);
-    assert.equal(conflicts[0].resolution?.finalValue, "3");
+    assert.equal(trace[0].effects[0].kind, "removeNode");
+    assert.equal(trace[1].status, "missed");
+    assert.equal(trace[1].diagnosticKind, "order-induced-miss");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("missing vanilla file and missing XPath become warnings without throwing", async () => {
-  const fixture = await makeGameFixture("items.xml", `<items><item name="coin"/></items>`);
+test("reference to a later appended target becomes dependency-order-miss", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items></items>`);
   try {
-    const missingFileOps = [
-      op("A", 1, "missing.xml", "/items/item/@value", "set", "1"),
-      op("B", 2, "missing.xml", "/items/item/@value", "set", "2")
-    ];
-    const missingXpathOps = [
-      op("A", 1, "items.xml", "/items/item[@name='absent']/@value", "set", "1"),
-      op("B", 2, "items.xml", "/items/item[@name='absent']/@value", "set", "2")
-    ];
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='future']/@value", "set", "2"),
+      op("B", 2, "items.xml", "/items", "append", `<item name="future" value="1"/>`, "xml", "<item future>")
+    ], fixture.gamePath);
 
-    const fileResult = await resolveConflicts(detectConflicts(missingFileOps), missingFileOps, fixture.gamePath);
-    const xpathResult = await resolveConflicts(detectConflicts(missingXpathOps), missingXpathOps, fixture.gamePath);
-
-    assert.equal(fileResult.conflicts[0].resolution?.status, "unresolved");
-    assert.match(fileResult.warnings[0].kind, /missing-vanilla/);
-    assert.equal(xpathResult.conflicts[0].resolution?.status, "unresolved");
-    assert.match(xpathResult.warnings[0].message, /target was not found/i);
+    assert.equal(trace[0].status, "missed");
+    assert.equal(trace[0].diagnosticKind, "dependency-order-miss");
+    assert.equal(trace[1].effects[0].kind, "appendChild");
   } finally {
     await fixture.cleanup();
   }
 });
 
-test("vanilla parse errors become warnings without throwing", async () => {
-  const fixture = await makeGameFixture("items.xml", `<items><item name="coin"></items>`);
+test("broad XPath matches and csv operations remain diagnostic traces", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="a"/><item name="b"/></items>`);
   try {
-    const operations = [
-      op("A", 1, "items.xml", "/items/item[@name='coin']/@value", "set", "1"),
-      op("B", 2, "items.xml", "/items/item[@name='coin']/@value", "set", "2")
-    ];
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item", "setattribute", "checked", "text", "checked", { name: "tag", value: "checked" }),
+      op("B", 2, "items.xml", "/items", "csv", "ignored")
+    ], fixture.gamePath);
 
-    const { conflicts, warnings } = await resolveConflicts(detectConflicts(operations), operations, fixture.gamePath);
-
-    assert.equal(conflicts[0].resolution?.status, "unresolved");
-    assert.match(warnings[0].kind, /parse-error/);
-  } finally {
-    await fixture.cleanup();
-  }
-});
-
-test("skips unrelated operations when resolving a conflict target", async () => {
-  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" value="0"/><item name="other" value="0"/></items>`);
-  try {
-    const operations = [
-      op("A", 1, "items.xml", "/items/item[@name='coin']/@value", "set", "1"),
-      op("B", 2, "items.xml", "/items/item[@name='coin']/@value", "set", "2"),
-      op("BrokenUnrelated", 3, "items.xml", "/items/item[@name='absent']/@value", "set", "999")
-    ];
-
-    const { conflicts, warnings } = await resolveConflicts(detectConflicts(operations.slice(0, 2)), operations, fixture.gamePath);
-
-    assert.equal(warnings.length, 0);
-    assert.equal(conflicts[0].resolution?.status, "resolved");
-    assert.equal(conflicts[0].resolution?.finalValue, "2");
+    assert.equal(trace[0].status, "ambiguous");
+    assert.equal(trace[0].matchCountBefore, 2);
+    assert.equal(trace[0].diagnosticKind, "broad-match-risk");
+    assert.equal(trace[1].status, "unsupported");
+    assert.equal(trace[1].diagnosticKind, "unsupported-operation");
   } finally {
     await fixture.cleanup();
   }
@@ -141,7 +120,8 @@ function op(
   operation: string,
   valueText?: string,
   valueKind: XmlPatchOperation["valueKind"] = valueText == null ? "target" : "text",
-  valueSummary = valueText
+  valueSummary = valueText,
+  attributes?: Record<string, string>
 ): XmlPatchOperation {
   return {
     modName,
@@ -152,6 +132,7 @@ function op(
     operation,
     xpath,
     line: order,
+    attributes,
     valueKind,
     valueText,
     valueSummary
@@ -159,7 +140,7 @@ function op(
 }
 
 async function makeGameFixture(file: string, xml: string): Promise<{ gamePath: string; cleanup: () => Promise<void> }> {
-  const root = await mkdtemp(path.join(tmpdir(), "wasteland-resolution-"));
+  const root = await mkdtemp(path.join(tmpdir(), "wasteland-trace-"));
   const configPath = path.join(root, "Data", "Config");
   await mkdir(configPath, { recursive: true });
   await writeFile(path.join(configPath, file), xml, "utf8");

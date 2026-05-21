@@ -31,12 +31,14 @@ test("scan resolves direct and nested ModInfo, XML patches, DLLs, and conflicts"
   await writeFile(path.join(mo2, "mods", "A", "ModInfo.xml"), `<ModInfo><Name value="Alpha"/><Version value="1"/></ModInfo>`, "utf8");
   await writeFile(path.join(mo2, "mods", "B", "Child", "ModInfo.xml"), `<ModInfo><Name value="Bravo"/></ModInfo>`, "utf8");
   await writeFile(path.join(mo2, "mods", "A", "Config", "items.xml"), `<configs>\n<set xpath="/items/item[@name='x']/property[@name='Price']/@value">1</set>\n</configs>`, "utf8");
-  await writeFile(path.join(mo2, "mods", "B", "Child", "Config", "items.xml"), `<configs>\n<append xpath="/items/item[@name='x']/property[@name='Price']"/>\n</configs>`, "utf8");
+  await writeFile(path.join(mo2, "mods", "B", "Child", "Config", "items.xml"), `<configs>\n<append xpath="/items/item[@name='x']/property[@name='Price']"/>\n<setattribute xpath="/items/item[@name='x']" name="tags" value="coin"/>\n<csv xpath="/items/item[@name='x']">ignored</csv>\n</configs>`, "utf8");
   await writeFile(path.join(mo2, "mods", "B", "Child", "Harmony.dll"), "dll", "utf8");
 
   const scan = await scanMo2(mo2, "Default");
   assert.equal(scan.enabledMods.length, 2);
-  assert.equal(scan.xmlPatches.length, 2);
+  assert.equal(scan.xmlPatches.length, 4);
+  assert.equal(scan.xmlPatches.find((patch) => patch.operation === "setattribute")?.attributes?.name, "tags");
+  assert.equal(scan.xmlPatches.find((patch) => patch.operation === "csv")?.valueText, "ignored");
   assert.equal(scan.dlls.length, 1);
   assert.equal(scan.enabledMods[1].displayName, "Bravo");
 
