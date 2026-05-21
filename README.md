@@ -1,0 +1,31 @@
+# Wasteland Launcher Diagnostics MVP
+
+Read-only TypeScript CLI for inspecting a 7 Days to Die Mod Organizer 2 workspace.
+
+## Commands
+
+```powershell
+npm install
+npm test
+node dist/cli.js scan --mo2 C:\Modding\MO2 --profile Default
+node dist/cli.js conflicts --mo2 C:\Modding\MO2 --profile Default
+node dist/cli.js logs --latest
+node dist/cli.js inventory --mo2 C:\Modding\MO2 --profile Default --waka
+node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out _analysis\wasteland-context.json
+node dist/cli.js visualize --input _analysis\wasteland-context.json --out _analysis\wasteland-report.html
+```
+
+All commands accept `--json` except `context-pack`, which already emits JSON or writes it to `--out`, and `visualize`, which emits HTML or writes it to `--out`.
+
+## Current Scope
+
+- Reads `profiles/<profile>/modlist.txt` as the source of enabled mod order.
+- Resolves both direct `ModInfo.xml` roots and nested child mod roots.
+- Indexes `Config/*.xml` patch operations and their xpath/path attributes.
+- Records DLL filename, size, modified time, and SHA-256 hash.
+- Reports simple same-file xpath conflicts and the last modlist winner.
+- Reads the latest non-empty client log from `%APPDATA%\7DaysToDie\logs`.
+- Renders a static, self-contained HTML conflict dashboard from a context-pack JSON file.
+
+The MVP does not write to MO2, the game install, a dedicated server, or a remote notebook server. The only write path is `context-pack --out`.
+`visualize --out` also writes only to the explicitly requested HTML report path.

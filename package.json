@@ -1,0 +1,25 @@
+{
+  "name": "wasteland-launcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wasteland": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/**/*.test.js",
+    "wasteland": "npm run build --silent && node dist/cli.js"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "fast-xml-parser": "^5.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
