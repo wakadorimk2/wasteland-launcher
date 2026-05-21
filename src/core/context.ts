@@ -4,13 +4,23 @@ import { ContextPack } from "./types.js";
 import { scanMo2 } from "./scanner.js";
 import { detectConflicts } from "./conflicts.js";
 import { scanLatestClientLog } from "./logs.js";
+import { defaultGameInstallPath, ResolveOptions, resolveConflicts } from "./resolution.js";
 
-export async function buildContextPack(mo2Path: string, profile: string): Promise<ContextPack> {
+export async function buildContextPack(
+  mo2Path: string,
+  profile: string,
+  gamePath = defaultGameInstallPath(),
+  resolveOptions: ResolveOptions = {}
+): Promise<ContextPack> {
   const scan = await scanMo2(mo2Path, profile);
+  const resolution = await resolveConflicts(detectConflicts(scan.xmlPatches), scan.xmlPatches, gamePath, resolveOptions);
   return {
     generatedAt: new Date().toISOString(),
-    scan,
-    conflicts: detectConflicts(scan.xmlPatches),
+    scan: {
+      ...scan,
+      warnings: [...scan.warnings, ...resolution.warnings]
+    },
+    conflicts: resolution.conflicts,
     logs: await scanLatestClientLog(undefined, scan.enabledMods)
   };
 }

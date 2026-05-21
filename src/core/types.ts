@@ -27,6 +27,31 @@ export interface XmlPatchOperation {
   operation: string;
   xpath: string;
   line: number;
+  valueKind?: "text" | "xml" | "target" | "empty" | "unknown";
+  valueText?: string;
+  valueSummary?: string;
+}
+
+export interface ConflictResolutionStep {
+  modName: string;
+  displayName: string;
+  order: number;
+  operation: string;
+  xpath: string;
+  beforeValue?: string;
+  authoredValue?: string;
+  afterValue?: string;
+  status: "applied" | "unresolved";
+  warning?: string;
+}
+
+export interface ConflictResolution {
+  status: "resolved" | "unresolved";
+  vanillaValue?: string;
+  finalValue?: string;
+  finalSource?: string;
+  history: ConflictResolutionStep[];
+  warnings: string[];
 }
 
 export interface DllInfo {
@@ -65,6 +90,7 @@ export interface ConflictGroup {
   operations: XmlPatchOperation[];
   winner: XmlPatchOperation;
   exact: boolean;
+  resolution?: ConflictResolution;
 }
 
 export interface LogWarning {

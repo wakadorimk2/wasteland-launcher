@@ -1,12 +1,14 @@
 import path from "node:path";
 import { readdir, readFile, stat } from "node:fs/promises";
+import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import { DllInfo, ModRoot, ScanResult, XmlPatchOperation } from "./types.js";
 import { listFiles, pathExists, fileSizeAndMtime, sha256File } from "./files.js";
 import { modsPath, modlistPath, toPosixRelative } from "./paths.js";
 import { readModlist } from "./modlist.js";
-import { parseXmlFile, readXmlAttribute } from "./xml.js";
+import { parseXmlFile } from "./xml.js";
 
 const patchOperations = new Set(["append", "set", "remove", "insertBefore", "insertAfter"]);
+const serializer = new XMLSerializer();
 
 export async function scanMo2(mo2Path: string, profile: string): Promise<ScanResult> {
   const listPath = modlistPath(mo2Path, profile);
@@ -116,8 +118,9 @@ async function extractXmlPatches(mod: ModRoot): Promise<XmlPatchOperation[]> {
   const operations: XmlPatchOperation[] = [];
 
   for (const file of files) {
+    const text = await readFile(file, "utf8");
     try {
-      await parseXmlFile(file);
+      operations.push(...extractPatchOperationsFromText(mod, configPath, file, text));
     } catch {
       operations.push({
         modName: mod.mo2Name,
@@ -129,36 +132,108 @@ async function extractXmlPatches(mod: ModRoot): Promise<XmlPatchOperation[]> {
         xpath: "",
         line: 1
       });
-      continue;
     }
-
-    const text = await readFile(file, "utf8");
-    const lines = text.split(/\r?\n/);
-    lines.forEach((lineText, index) => {
-      const openTag = /<\s*([A-Za-z][\w.-]*)\b[^>]*>/g;
-      let match: RegExpExecArray | null;
-      while ((match = openTag.exec(lineText)) !== null) {
-        const operation = match[1];
-        if (!patchOperations.has(operation)) {
-          continue;
-        }
-        const tagText = match[0];
-        const xpath = readXmlAttribute(tagText, "xpath") ?? readXmlAttribute(tagText, "path") ?? "";
-        operations.push({
-          modName: mod.mo2Name,
-          displayName: mod.displayName,
-          order: mod.order,
-          file: toPosixRelative(configPath, file),
-          path: file,
-          operation,
-          xpath,
-          line: index + 1
-        });
-      }
-    });
   }
 
   return operations;
+}
+
+function extractPatchOperationsFromText(mod: ModRoot, configPath: string, file: string, text: string): XmlPatchOperation[] {
+  const document = parsePatchDocument(text);
+  const elements = Array.from(document.getElementsByTagName("*"));
+  const output: XmlPatchOperation[] = [];
+  let searchFrom = 0;
+
+  for (const element of elements) {
+    const operation = element.tagName;
+    if (!patchOperations.has(operation)) {
+      continue;
+    }
+    const xpath = element.getAttribute("xpath") ?? element.getAttribute("path") ?? "";
+    const openTagIndex = findOpenTag(text, operation, searchFrom);
+    if (openTagIndex >= 0) {
+      searchFrom = openTagIndex + 1;
+    }
+    const value = extractPatchValue(operation, element);
+    output.push({
+      modName: mod.mo2Name,
+      displayName: mod.displayName,
+      order: mod.order,
+      file: toPosixRelative(configPath, file),
+      path: file,
+      operation,
+      xpath,
+      line: openTagIndex >= 0 ? lineNumberAt(text, openTagIndex) : 1,
+      valueKind: value.kind,
+      valueText: value.text,
+      valueSummary: value.summary
+    });
+  }
+
+  return output;
+}
+
+function parsePatchDocument(text: string): ReturnType<DOMParser["parseFromString"]> {
+  const errors: string[] = [];
+  const document = new DOMParser({
+    onError: (_level: string, message: string) => errors.push(message)
+  }).parseFromString(stripBom(text), "text/xml");
+  if (errors.length > 0 || !document.documentElement) {
+    throw new Error(errors.join("; ") || "no document element");
+  }
+  return document;
+}
+
+function stripBom(text: string): string {
+  return text.replace(/^\uFEFF/, "");
+}
+
+function extractPatchValue(operation: string, element: any): { kind: XmlPatchOperation["valueKind"]; text?: string; summary?: string } {
+  if (operation === "remove") {
+    return { kind: "target", summary: "remove target" };
+  }
+  if (operation === "set") {
+    const text = (element.textContent ?? "").trim();
+    return { kind: text ? "text" : "empty", text, summary: summarizeValue(text) };
+  }
+  const fragments = Array.from(element.childNodes)
+    .filter((node: any) => node.nodeType === 1)
+    .map((node) => serializer.serializeToString(node as any))
+    .join("");
+  if (!fragments.trim()) {
+    return { kind: "empty", text: "", summary: "(empty)" };
+  }
+  const children = Array.from(element.childNodes).filter((node: any) => node.nodeType === 1) as any[];
+  return { kind: "xml", text: fragments, summary: summarizeXmlChildren(children, fragments) };
+}
+
+function summarizeXmlChildren(children: any[], fallbackXml: string): string {
+  const labels = children.slice(0, 3).map((child) => {
+    const name = child.getAttribute("name") ?? child.getAttribute("id");
+    return name ? `<${child.tagName} ${name}>` : `<${child.tagName}>`;
+  });
+  const suffix = children.length > labels.length ? ` +${children.length - labels.length}` : "";
+  return labels.length > 0 ? `${labels.join(", ")}${suffix}` : summarizeValue(fallbackXml);
+}
+
+function summarizeValue(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized;
+}
+
+function findOpenTag(text: string, tagName: string, from: number): number {
+  const pattern = new RegExp(`<\\s*${escapeRegExp(tagName)}\\b`, "g");
+  pattern.lastIndex = from;
+  const match = pattern.exec(text);
+  return match?.index ?? -1;
+}
+
+function lineNumberAt(text: string, offset: number): number {
+  return text.slice(0, offset).split(/\r?\n/).length;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function findDlls(mod: ModRoot): Promise<DllInfo[]> {

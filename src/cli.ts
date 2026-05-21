@@ -81,9 +81,19 @@ addMo2Options(program.command("inventory").description("List enabled mod invento
   });
 
 addMo2Options(program.command("context-pack").description("Build an LLM-friendly diagnostics JSON pack"))
+  .option("--game <path>", "7 Days to Die install path for vanilla Data/Config resolution")
   .option("--out <path>", "write JSON to this path; stdout when omitted")
+  .option("--resolve-mode <mode>", "conflict resolution mode: fast or exact", "fast")
+  .option("--resolve-timeout-ms <ms>", "best-effort conflict resolution budget in milliseconds", "8000")
+  .option("--trace-resolve <path>", "write conflict resolution trace JSONL to this path")
   .action(async (options) => {
-    const pack = await buildContextPack(options.mo2, options.profile);
+    const mode = options.resolveMode === "exact" ? "exact" : "fast";
+    const timeoutMs = Number.parseInt(options.resolveTimeoutMs, 10);
+    const pack = await buildContextPack(options.mo2, options.profile, options.game, {
+      mode,
+      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000,
+      tracePath: options.traceResolve
+    });
     if (options.out) {
       await writeContextPack(options.out, pack);
       console.log(`Wrote ${options.out}`);

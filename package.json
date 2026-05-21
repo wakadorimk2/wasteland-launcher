@@ -9,15 +9,26 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/**/*.test.js",
-    "wasteland": "npm run build --silent && node dist/cli.js"
+    "wasteland": "npm run build --silent && node dist/cli.js",
+    "ui:dev": "vite --config ui/vite.config.ts",
+    "ui:build": "tsc -p ui/tsconfig.json && vite build --config ui/vite.config.ts",
+    "ui:preview": "vite preview --config ui/vite.config.ts"
   },
   "dependencies": {
+    "@xmldom/xmldom": "^0.9.10",
     "commander": "^14.0.2",
-    "fast-xml-parser": "^5.3.2"
+    "fast-xml-parser": "^5.3.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "xpath": "^0.0.34"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
-    "typescript": "^5.9.3"
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.5"
   },
   "engines": {
     "node": ">=20"
