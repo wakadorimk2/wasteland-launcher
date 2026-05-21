@@ -1,15 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, open, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { ContextPack } from "./types.js";
 import { buildHeatmapCells, buildTreemapItems, categorizeConflict, rankConflictFiles, rankConflicts, renderVisualization } from "./visualize.js";
-
-const execFileAsync = promisify(execFile);
 
 test("visualization renders hero stats, treemap, heatmap, details, and warning hotspots", () => {
   const pack = fixturePack();
@@ -86,16 +83,42 @@ test("visualize writes HTML to stdout when out is omitted", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wasteland-visualize-"));
   await mkdir(root, { recursive: true });
   const input = path.join(root, "context.json");
+  const stdoutPath = path.join(root, "stdout.html");
   await writeFile(input, JSON.stringify(fixturePack()), "utf8");
 
   const testDir = path.dirname(fileURLToPath(import.meta.url));
   const cliPath = path.resolve(testDir, "..", "cli.js");
-  const { stdout } = await execFileAsync(process.execPath, [cliPath, "visualize", "--input", input]);
+  const stdoutFile = await open(stdoutPath, "w");
+  try {
+    await spawnAsync(process.execPath, [cliPath, "visualize", "--input", input], stdoutFile.fd);
+  } finally {
+    await stdoutFile.close();
+  }
+  const stdout = await readFile(stdoutPath, "utf8");
 
   assert.match(stdout, /^<!doctype html>/);
   assert.match(stdout, /7DTD Mod Conflict Analyzer/);
   assert.match(stdout, /items\.xml/);
 });
+
+function spawnAsync(command: string, args: string[], stdoutFd: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    const child = spawn(command, args, { stdio: ["ignore", stdoutFd, "pipe"] });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`Command failed with ${signal ?? code}: ${stderr}`));
+    });
+  });
+}
 
 function fixturePack(): ContextPack {
   return {

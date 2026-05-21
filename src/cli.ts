@@ -171,7 +171,7 @@ function printInventory(mods: Awaited<ReturnType<typeof scanMo2>>["enabledMods"]
   })));
 }
 
-program.parseAsync().catch((error: unknown) => {
+await program.parseAsync().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });

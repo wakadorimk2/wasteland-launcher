@@ -8,9 +8,20 @@ import { pathExists } from "./files.js";
 const defaultGamePath = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\7 Days To Die";
 const serializer = new XMLSerializer();
 const keyAttributes = ["name", "id", "class", "type", "value"];
+const broadReplayTargetLimit = 100;
 
 type XmlDocument = ReturnType<DOMParser["parseFromString"]>;
 type DomNode = any;
+type AttrCondition = { attr: string; value: string; op: "equals" | "contains" | "startsWith" };
+type AttrPredicate = AttrCondition[][];
+type ChildCondition = { tag: string; attrs: AttrCondition[] };
+type SimpleXPathStep = { tag: string; attrPredicates: AttrPredicate[]; childConditions: ChildCondition[]; ordinal?: number };
+
+interface SimpleXPath {
+  mode: "absolute" | "descendant";
+  steps: SimpleXPathStep[];
+  attribute?: string;
+}
 
 export interface TraceOptions {
   mode?: "fast" | "exact";
@@ -28,10 +39,11 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
   const byFile = groupBy(operations, (operation) => operation.file);
   const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? 8_000;
+  const fileEntries = Array.from(byFile.entries());
 
-  for (const [file, fileOperations] of byFile) {
+  for (const [fileIndex, [file, fileOperations]] of fileEntries.entries()) {
     if (budgetExpired(startedAt, timeoutMs)) {
-      pushBudgetSkipped(trace, warnings, file, sortOperations(fileOperations));
+      pushBudgetSkipped(trace, warnings, file, sortOperations(fileOperations), fileIndex + 1, fileEntries.length, Date.now() - startedAt);
       continue;
     }
     const vanillaPath = path.join(gamePath, "Data", "Config", file);
@@ -63,13 +75,15 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
     const previousScalarWrites = new Set<string>();
     const futureAdds = collectFutureAdds(fileOperations);
     const sortedOperations = sortOperations(fileOperations);
-    for (const [index, operation] of sortedOperations.entries()) {
+    const replayIndex = new XmlReplayIndex(document);
+    for (const [operationIndex, operation] of sortedOperations.entries()) {
       if (budgetExpired(startedAt, timeoutMs)) {
-        pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(index));
+        pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(operationIndex), fileIndex + 1, fileEntries.length, Date.now() - startedAt);
         break;
       }
-      const item = replayOperation(document, operation, previouslyRemoved, futureAdds, previousScalarWrites);
+      const item = replayOperation(document, operation, previouslyRemoved, futureAdds, previousScalarWrites, replayIndex, options.mode ?? "fast");
       trace.push(item);
+      let indexDirty = false;
       for (const effect of item.effects) {
         if (effect.kind === "removeNode") {
           previouslyRemoved.add(effect.target);
@@ -77,6 +91,12 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
         if (effect.kind === "setValue" || effect.kind === "setAttribute" || effect.kind === "removeAttribute" || effect.kind === "appendAttributeText") {
           previousScalarWrites.add(effect.target);
         }
+        if (effectMayAffectIndex(effect)) {
+          indexDirty = true;
+        }
+      }
+      if (indexDirty) {
+        replayIndex.markDirty();
       }
       if (item.diagnosticKind !== "ok") {
         warnings.push({ kind: `trace-${item.diagnosticKind}`, message: item.message ?? `${operation.operation} ${operation.xpath}: ${item.diagnosticKind}`, modName: operation.modName, path: operation.file });
@@ -91,16 +111,24 @@ function budgetExpired(startedAt: number, timeoutMs: number): boolean {
   return Date.now() - startedAt > timeoutMs;
 }
 
-function pushBudgetSkipped(trace: PatchTrace[], warnings: ScanWarning[], file: string, operations: XmlPatchOperation[]): void {
+function pushBudgetSkipped(trace: PatchTrace[], warnings: ScanWarning[], file: string, operations: XmlPatchOperation[], fileIndex: number, fileCount: number, elapsedMs: number): void {
   if (operations.length === 0) return;
-  const message = `Patch trace replay budget exceeded; ${operations.length} operation(s) left as partial diagnostics for ${file}`;
+  const message = `Patch trace replay budget exceeded at file ${fileIndex}/${fileCount} (${file}); ${operations.length} operation(s) left as partial diagnostics; elapsed ${elapsedMs}ms`;
   warnings.push({ kind: "trace-budget-exceeded", message, path: file });
   for (const operation of operations) {
     trace.push(baseTrace(operation, "partial", 0, [], [{ kind: "unsupported", target: operation.xpath, summary: message }], "unsupported-operation", "low", message));
   }
 }
 
-function replayOperation(document: XmlDocument, operation: XmlPatchOperation, previouslyRemoved: Set<string>, futureAdds: Set<string>, previousScalarWrites: Set<string>): PatchTrace {
+function replayOperation(
+  document: XmlDocument,
+  operation: XmlPatchOperation,
+  previouslyRemoved: Set<string>,
+  futureAdds: Set<string>,
+  previousScalarWrites: Set<string>,
+  index: XmlReplayIndex,
+  mode: TraceOptions["mode"]
+): PatchTrace {
   if (operation.operation === "parse-error") {
     return baseTrace(operation, "parseError", 0, [], [{ kind: "parseError", target: operation.path, summary: "patch XML parse error" }], "parse-error", "low");
   }
@@ -110,7 +138,7 @@ function replayOperation(document: XmlDocument, operation: XmlPatchOperation, pr
 
   let selected: DomNode[];
   try {
-    selected = selectNodes(document, operation.xpath);
+    selected = selectNodes(document, operation.xpath, index, mode ?? "fast");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return baseTrace(operation, "unsupported", 0, [], [{ kind: "unsupported", target: operation.xpath, summary: message }], "unsupported-operation", "low", message);
@@ -123,11 +151,13 @@ function replayOperation(document: XmlDocument, operation: XmlPatchOperation, pr
     return baseTrace(operation, "missed", 0, [], [{ kind: "miss", target: canonical, summary: diagnosticKind }], diagnosticKind, "high", diagnosticKind);
   }
 
-  const targets = selected.map((node) => targetFor(node, operation.xpath));
+  const replayNodes = selected.length > broadReplayTargetLimit ? selected.slice(0, broadReplayTargetLimit) : selected;
+  const targets = replayNodes.map((node) => targetFor(node, operation.xpath));
   const effects: PatchTraceEffect[] = [];
   const op = operation.operation.toLowerCase();
+  const fragmentTemplates = op === "append" || op === "insertbefore" || op === "insertafter" ? fragmentNodes(document, operation.valueText) : undefined;
 
-  for (const node of selected) {
+  for (const node of replayNodes) {
     const target = targetFor(node, operation.xpath);
     if (op === "set") {
       effects.push(applySet(node, target, operation));
@@ -136,11 +166,11 @@ function replayOperation(document: XmlDocument, operation: XmlPatchOperation, pr
     } else if (op === "removeattribute") {
       effects.push(applyRemoveAttribute(node, target, operation));
     } else if (op === "append") {
-      effects.push(applyAppend(document, node, target, operation));
+      effects.push(applyAppend(node, target, operation, fragmentTemplates ?? []));
     } else if (op === "remove") {
       effects.push(applyRemove(node, target));
     } else if (op === "insertbefore" || op === "insertafter") {
-      effects.push(applyInsert(document, node, target, operation, op === "insertbefore"));
+      effects.push(applyInsert(node, target, operation, op === "insertbefore", fragmentTemplates ?? []));
     } else {
       effects.push({ kind: "unsupported", target: target.canonical, summary: `${operation.operation} replay is not implemented` });
     }
@@ -152,7 +182,10 @@ function replayOperation(document: XmlDocument, operation: XmlPatchOperation, pr
       ? "broad-match-risk"
       : overwritesPreviousScalar(effects, previousScalarWrites) ? "silent-overwrite" : "ok";
   const status = diagnosticKind === "unsupported-operation" ? "unsupported" : matchCount > 1 ? "ambiguous" : "applied";
-  return baseTrace(operation, status, matchCount, targets, effects, diagnosticKind, matchCount > 1 ? "medium" : "high", diagnosticKind === "ok" ? undefined : diagnosticKind);
+  const message = matchCount > broadReplayTargetLimit
+    ? `${diagnosticKind}; replay sampled ${broadReplayTargetLimit} of ${matchCount} matched target(s)`
+    : diagnosticKind === "ok" ? undefined : diagnosticKind;
+  return baseTrace(operation, status, matchCount, targets, effects, diagnosticKind, matchCount > 1 ? "medium" : "high", message);
 }
 
 function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation): PatchTraceEffect {
@@ -184,14 +217,14 @@ function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation
   return { kind: "removeAttribute", target: `${target.nodeRef}/@${attr}`, before, after: undefined };
 }
 
-function applyAppend(document: XmlDocument, node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation): PatchTraceEffect {
+function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, templates: DomNode[]): PatchTraceEffect {
   if (node.nodeType === 2) {
     const before = node.value ?? "";
     const after = `${before}${operation.valueText ?? ""}`;
     node.value = after;
     return { kind: "appendAttributeText", target: target.canonical, before, after, value: operation.valueSummary ?? operation.valueText };
   }
-  const nodes = fragmentNodes(document, operation.valueText);
+  const nodes = cloneFragmentNodes(templates);
   for (const child of nodes) {
     node.appendChild(child);
   }
@@ -208,8 +241,8 @@ function applyRemove(node: DomNode, target: PatchTraceTarget): PatchTraceEffect 
   return { kind: "removeNode", target: target.canonical, before };
 }
 
-function applyInsert(document: XmlDocument, node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean): PatchTraceEffect {
-  const nodes = fragmentNodes(document, operation.valueText);
+function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean, templates: DomNode[]): PatchTraceEffect {
+  const nodes = cloneFragmentNodes(templates);
   const parent = node.parentNode;
   if (!parent) {
     return { kind: "unsupported", target: target.canonical, summary: "target has no parent" };
@@ -259,9 +292,329 @@ function parseXml(text: string): XmlDocument {
   return document;
 }
 
-function selectNodes(document: XmlDocument, expression: string): DomNode[] {
+function selectNodes(document: XmlDocument, expression: string, index: XmlReplayIndex, mode: TraceOptions["mode"]): DomNode[] {
+  if (mode !== "exact") {
+    const fast = selectSimpleXPath(document, expression, index);
+    if (fast) return fast;
+  }
   const result = xpath.select(expression, document as any);
   return Array.isArray(result) ? result as DomNode[] : [];
+}
+
+class XmlReplayIndex {
+  private dirty = true;
+  private byTag = new Map<string, DomNode[]>();
+  private byTagKey = new Map<string, DomNode[]>();
+
+  constructor(private readonly document: XmlDocument) {}
+
+  markDirty(): void {
+    this.dirty = true;
+  }
+
+  descendants(tag: string, keyAttr?: string, keyValue?: string): DomNode[] {
+    this.ensureFresh();
+    const nodes = keyAttr && keyValue != null ? this.byTagKey.get(indexKey(tag, keyAttr, keyValue)) ?? [] : this.byTag.get(tag) ?? [];
+    return nodes.filter((node) => isAttachedToRoot(node, this.document.documentElement));
+  }
+
+  children(node: DomNode): DomNode[] {
+    return Array.from(node.childNodes).filter((child: any) => child.nodeType === 1) as DomNode[];
+  }
+
+  liveDescendants(tag: string): DomNode[] {
+    const nodes: DomNode[] = [];
+    const root = this.document.documentElement;
+    if (!root) return nodes;
+    const visit = (node: DomNode): void => {
+      if (node.nodeType !== 1) return;
+      if (node.tagName === tag) nodes.push(node);
+      for (const child of this.children(node)) visit(child);
+    };
+    visit(root);
+    return nodes;
+  }
+
+  private ensureFresh(): void {
+    if (!this.dirty) return;
+    this.byTag = new Map();
+    this.byTagKey = new Map();
+    const root = this.document.documentElement;
+    if (root) this.walk(root);
+    this.dirty = false;
+  }
+
+  private walk(node: DomNode): void {
+    if (node.nodeType !== 1) return;
+    pushMap(this.byTag, node.tagName, node);
+    for (const attr of keyAttributes) {
+      const value = node.getAttribute?.(attr);
+      if (value) pushMap(this.byTagKey, indexKey(node.tagName, attr, value), node);
+    }
+    const children = this.children(node);
+    for (const child of children) this.walk(child);
+  }
+}
+
+function selectSimpleXPath(document: XmlDocument, expression: string, index: XmlReplayIndex): DomNode[] | undefined {
+  const parsed = parseSimpleXPath(expression);
+  if (!parsed) return undefined;
+
+  const elements = parsed.mode === "descendant"
+    ? selectDescendantSimple(parsed, index)
+    : selectAbsoluteSimple(document, parsed, index);
+  if (!elements) return undefined;
+  if (!parsed.attribute) return elements;
+
+  const attributes: DomNode[] = [];
+  for (const element of elements) {
+    const attr = element.getAttributeNode?.(parsed.attribute);
+    if (attr) attributes.push(attr);
+  }
+  return attributes;
+}
+
+function selectDescendantSimple(parsed: SimpleXPath, index: XmlReplayIndex): DomNode[] | undefined {
+  const reverse = selectDescendantByLastKey(parsed, index);
+  if (reverse) return reverse;
+  const [first, ...rest] = parsed.steps;
+  const key = firstIndexableCondition(first);
+  let candidates = [...index.descendants(first.tag, key?.attr, key?.value)];
+  if (key && candidates.length === 0) candidates = index.liveDescendants(first.tag);
+  let current = applyOrdinal(candidates.filter((node) => matchesStep(node, first, index)), first);
+  for (const step of rest) {
+    const next: DomNode[] = [];
+    for (const parent of current) {
+      for (const child of index.children(parent)) {
+        if (matchesStep(child, step, index)) next.push(child);
+      }
+    }
+    current = applyOrdinal(next, step);
+    if (current.length === 0) break;
+  }
+  return current;
+}
+
+function selectDescendantByLastKey(parsed: SimpleXPath, index: XmlReplayIndex): DomNode[] | undefined {
+  if (parsed.steps.length < 2) return undefined;
+  if (parsed.steps.some((step) => step.ordinal != null)) return undefined;
+  const last = parsed.steps[parsed.steps.length - 1];
+  const key = firstIndexableCondition(last);
+  if (!key) return undefined;
+  const matches: DomNode[] = [];
+  for (const candidate of index.descendants(last.tag, key.attr, key.value)) {
+    if (!matchesStep(candidate, last, index)) continue;
+    let current = candidate.parentNode;
+    let ok = true;
+    for (let stepIndex = parsed.steps.length - 2; stepIndex >= 0; stepIndex -= 1) {
+      const step = parsed.steps[stepIndex];
+      if (!current || !matchesStep(current, step, index)) {
+        ok = false;
+        break;
+      }
+      current = current.parentNode;
+    }
+    if (ok) matches.push(candidate);
+  }
+  return matches;
+}
+
+function selectAbsoluteSimple(document: XmlDocument, parsed: SimpleXPath, index: XmlReplayIndex): DomNode[] | undefined {
+  const root = document.documentElement;
+  if (!root || parsed.steps.length === 0) return [];
+  const [first, ...rest] = parsed.steps;
+  if (!matchesStep(root, first, index)) return [];
+  let current = applyOrdinal([root], first);
+  for (const step of rest) {
+    const next: DomNode[] = [];
+    const key = firstIndexableCondition(step);
+    if (key) {
+      const parents = new Set(current);
+      let candidates = index.descendants(step.tag, key.attr, key.value);
+      if (candidates.length === 0) {
+        const fallback: DomNode[] = [];
+        for (const parent of current) fallback.push(...index.children(parent));
+        candidates = fallback.filter((child) => child.tagName === step.tag);
+      }
+      for (const candidate of candidates) {
+        if (parents.has(candidate.parentNode) && matchesStep(candidate, step, index)) next.push(candidate);
+      }
+    } else {
+      for (const parent of current) {
+        for (const child of index.children(parent)) {
+          if (matchesStep(child, step, index)) next.push(child);
+        }
+      }
+    }
+    current = applyOrdinal(next, step);
+    if (current.length === 0) break;
+  }
+  return current;
+}
+
+function parseSimpleXPath(expression: string): SimpleXPath | undefined {
+  const normalized = canonicalFromXpath(expression);
+  if (/[|*]|\b(?:text|position|last)\b/.test(normalized)) return undefined;
+  const attributeMatch = /\/@([\w.-]+)$/.exec(normalized);
+  const attribute = attributeMatch?.[1];
+  const elementPath = attribute ? normalized.slice(0, -attributeMatch![0].length) : normalized;
+  const mode = elementPath.startsWith("//") ? "descendant" : "absolute";
+  const offset = elementPath.startsWith("//") ? 2 : elementPath.startsWith("/") ? 1 : 0;
+  const rawSegments = elementPath.slice(offset).split("/").filter(Boolean);
+  if (rawSegments.length === 0) return undefined;
+  const steps = rawSegments.map(parseSimpleStep);
+  if (steps.some((step) => !step)) return undefined;
+  return { mode, steps: steps as SimpleXPathStep[], attribute };
+}
+
+function parseSimpleStep(segment: string): SimpleXPathStep | undefined {
+  const match = /^([\w.-]+)((?:\[.+\])*)$/.exec(segment);
+  if (!match) return undefined;
+  const attrPredicates: AttrPredicate[] = [];
+  const childConditions: ChildCondition[] = [];
+  let ordinal: number | undefined;
+  for (const predicate of splitPredicates(match[2])) {
+    if (/^\d+$/.test(predicate)) {
+      ordinal = Number.parseInt(predicate, 10);
+      continue;
+    }
+    const child = parseChildCondition(predicate);
+    if (child) {
+      childConditions.push(child);
+      continue;
+    }
+    const group = parseAttrPredicate(predicate);
+    if (!group) return undefined;
+    attrPredicates.push(group);
+  }
+  return { tag: match[1], attrPredicates, childConditions, ordinal };
+}
+
+function splitPredicates(text: string): string[] {
+  const predicates: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "[") {
+      if (depth === 0) start = index + 1;
+      depth += 1;
+    } else if (char === "]") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        predicates.push(text.slice(start, index));
+        start = -1;
+      }
+      if (depth < 0) return [];
+    }
+  }
+  return depth === 0 ? predicates : [];
+}
+
+function parseChildCondition(predicate: string): ChildCondition | undefined {
+  const match = /^([\w.-]+)\[(.+)\]$/.exec(predicate);
+  if (!match) return undefined;
+  const attrs = parseAttrPredicate(match[2]);
+  return attrs && attrs.length === 1 ? { tag: match[1], attrs: attrs[0] } : undefined;
+}
+
+function parseAttrPredicate(predicate: string): AttrCondition[][] | undefined {
+  const orParts = predicate.split(/\s+or\s+/);
+  const groups: AttrCondition[][] = [];
+  for (const orPart of orParts) {
+    const andParts = orPart.split(/\s+and\s+/);
+    const group: AttrCondition[] = [];
+    for (const part of andParts) {
+      const trimmed = part.trim();
+      const equals = /^@([\w.$-]+)='([^']*)'$/.exec(trimmed);
+      if (equals) {
+        group.push({ attr: equals[1], value: equals[2], op: "equals" });
+        continue;
+      }
+      const contains = /^contains\(@([\w.$-]+),\s*'([^']*)'\)$/.exec(trimmed);
+      if (contains) {
+        group.push({ attr: contains[1], value: contains[2], op: "contains" });
+        continue;
+      }
+      const startsWith = /^starts-with\(@([\w.$-]+),\s*'([^']*)'\)$/.exec(trimmed);
+      if (startsWith) {
+        group.push({ attr: startsWith[1], value: startsWith[2], op: "startsWith" });
+        continue;
+      }
+      return undefined;
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+function matchesStep(node: DomNode, step: SimpleXPathStep, index: XmlReplayIndex): boolean {
+  if (node.nodeType !== 1 || node.tagName !== step.tag) return false;
+  for (const predicate of step.attrPredicates) {
+    if (!predicate.some((group) => group.every((condition) => matchesAttrCondition(node, condition)))) return false;
+  }
+  for (const condition of step.childConditions) {
+    if (!index.children(node).some((child) => child.tagName === condition.tag && condition.attrs.every((attr) => matchesAttrCondition(child, attr)))) return false;
+  }
+  return true;
+}
+
+function applyOrdinal(nodes: DomNode[], step: SimpleXPathStep): DomNode[] {
+  if (step.ordinal == null) return nodes;
+  const byParent = groupBy(nodes, (node) => node.parentNode ?? null);
+  const selected: DomNode[] = [];
+  for (const siblings of byParent.values()) {
+    const node = siblings[step.ordinal - 1];
+    if (node) selected.push(node);
+  }
+  return selected;
+}
+
+function matchesAttrCondition(node: DomNode, condition: AttrCondition): boolean {
+  const value = node.getAttribute?.(condition.attr);
+  if (condition.op === "contains") return (value ?? "").includes(condition.value);
+  if (condition.op === "startsWith") return (value ?? "").startsWith(condition.value);
+  return value === condition.value;
+}
+
+function firstIndexableCondition(step: SimpleXPathStep): AttrCondition | undefined {
+  for (const predicate of step.attrPredicates) {
+    if (predicate.length !== 1) continue;
+    for (const group of predicate) {
+      const condition = group[0];
+      if (condition && group.length === 1 && condition.op === "equals" && keyAttributes.includes(condition.attr)) return condition;
+    }
+  }
+  return undefined;
+}
+
+function pushMap<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const current = map.get(key);
+  if (current) {
+    current.push(value);
+    return;
+  }
+  map.set(key, [value]);
+}
+
+function indexKey(tag: string, attr: string, value: string): string {
+  return `${tag}\u0000${attr}\u0000${value}`;
+}
+
+function isAttachedToRoot(node: DomNode, root: DomNode | null): boolean {
+  let current: DomNode | null = node;
+  while (current) {
+    if (current === root) return true;
+    current = current.parentNode;
+  }
+  return false;
+}
+
+function effectMayAffectIndex(effect: PatchTraceEffect): boolean {
+  if (effect.kind === "appendChild" || effect.kind === "insertBefore" || effect.kind === "insertAfter" || effect.kind === "removeNode") return true;
+  if (effect.kind !== "setAttribute" && effect.kind !== "removeAttribute" && effect.kind !== "appendAttributeText") return false;
+  const attr = attributeNameFromXpath(effect.target);
+  return attr != null && keyAttributes.includes(attr);
 }
 
 function targetFor(node: DomNode, fallbackXpath: string): PatchTraceTarget {
@@ -317,6 +670,10 @@ function fragmentNodes(document: XmlDocument, text: string | undefined): DomNode
   const fragment = parseXml(`<__root>${text}</__root>`);
   const nodes = Array.from(fragment.documentElement!.childNodes).filter((node: any) => node.nodeType === 1) as DomNode[];
   return nodes.map((node) => document.importNode ? document.importNode(node, true) : node.cloneNode(true));
+}
+
+function cloneFragmentNodes(nodes: DomNode[]): DomNode[] {
+  return nodes.map((node) => node.cloneNode(true));
 }
 
 function collectFutureAdds(operations: XmlPatchOperation[]): Set<string> {
