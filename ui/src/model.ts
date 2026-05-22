@@ -6,10 +6,13 @@ export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; de
   "dependency-order-miss": { label: "Dependency-order miss", risk: "warn", desc: "A patch appears to reference a target that is added later." },
   "silent-overwrite": { label: "Silent overwrite", risk: "danger", desc: "A later scalar write hides an earlier write on the same canonical target." },
   "structural-mask": { label: "Structural mask", risk: "warn", desc: "A structural operation hides or removes another change." },
+  "slot-order-dependent": { label: "Slot order dependency", risk: "warn", desc: "A scalar slot is changed by non-commuting operations." },
+  "sibling-order-dependent": { label: "Sibling order dependency", risk: "warn", desc: "Structural inserts share a parent or anchor, so sibling order matters." },
   "broad-match-risk": { label: "Broad selector", risk: "warn", desc: "The XPath matched multiple targets." },
   "unsupported-operation": { label: "Unsupported op", risk: "info", desc: "The patch is inventoried but not replayed in v0.2." },
   "parse-error": { label: "Parse error", risk: "critical", desc: "The patch or vanilla XML could not be parsed." },
   "ambiguous-target": { label: "Ambiguous target", risk: "warn", desc: "The patch matched more targets than expected." },
+  "unknown-risk": { label: "Unknown risk", risk: "info", desc: "The engine found conservative evidence but could not prove the target." },
   ok: { label: "Applied", risk: "safe", desc: "The replayed patch has no diagnostic warning." }
 };
 
@@ -46,6 +49,7 @@ const samplePack: ContextPack = {
     warnings: []
   },
   trace: [],
+  diagnosticGroups: [],
   conflicts: [],
   logs: { warnings: [] }
 };
@@ -84,6 +88,7 @@ samplePack.conflicts = [
     exact: false
   }
 ];
+samplePack.diagnosticGroups = samplePack.conflicts;
 
 function op(modName: string, order: number, file: string, xpath: string, operation: string, line: number, valueText?: string, valueKind: "text" | "xml" | "target" | "empty" | "unknown" = valueText == null ? "target" : "text", valueSummary = valueText, attributes?: Record<string, string>) {
   return { modName, displayName: modName, order, file, path: xpath, operation, xpath, line, valueText, valueKind, valueSummary, attributes };
@@ -106,7 +111,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
   const patchesByMod = groupBy(pack.scan.xmlPatches, (patch) => patch.modName);
   const patchesByFile = groupBy(pack.scan.xmlPatches, (patch) => patch.file);
   const tracesByFile = groupBy(traces, (item) => item.file);
-  const conflictGroups = pack.conflicts ?? [];
+  const conflictGroups = pack.diagnosticGroups ?? pack.conflicts ?? [];
   const traceIndex = buildTraceIndex(traces);
   const rootsByMod = groupBy(pack.scan.enabledMods, (mod) => mod.mo2Name);
   const seenRoots = new Set<string>();
@@ -214,10 +219,10 @@ function buildConflictGroupRows(groups: ContextPack["conflicts"], traceIndex: Ma
     const evidence = operations.map((operation) => operationEvidence(operation, traceIndex));
     const traces = evidence.map((item) => item.trace).filter((item): item is PatchTrace => Boolean(item));
     const category = categoryForGroup(operations, traces);
-    const kind = worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
-    const winner = group.winner;
+    const kind = group.kind ?? worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
+    const winner = group.winner ?? operations[operations.length - 1];
     const final = finalValueForOperation(winner, traces.find((trace) => operationKey(trace) === operationKey(winner)));
-    const target = group.normalizedXpath;
+    const target = group.displayTarget ?? group.normalizedXpath;
     const risk = riskForConflictGroup(group, traceIndex);
     const finalKind: ReviewRow["finalKind"] = category === "value" ? "final" : "status";
     return [{
@@ -326,6 +331,7 @@ function categoryForGroup(operations: ContextPack["scan"]["xmlPatches"], traces:
 }
 
 function riskForConflictGroup(group: ContextPack["conflicts"][number], traceIndex: Map<string, PatchTrace>): Risk {
+  if (group.risk) return group.risk;
   const traces = group.operations.map((operation) => traceIndex.get(operationKey(operation))).filter((item): item is PatchTrace => Boolean(item));
   const traceRisk = riskForDiagnostics(traces);
   if (traceRisk === "critical") return "critical";
@@ -347,7 +353,8 @@ function sourceForFallback(traces: PatchTrace[]): string {
 }
 
 function explainConflictGroup(group: ContextPack["conflicts"][number], traces: PatchTrace[], category: ConflictCategory): string {
-  if (group.exact) return `Replay proved these operations touch ${group.normalizedXpath}; load order winner is ${group.winner.modName}.`;
+  if (group.classification) return `${group.classification}; confidence ${group.confidence ?? "unknown"}; target ${group.displayTarget ?? group.normalizedXpath}.`;
+  if (group.exact) return `Replay proved these operations touch ${group.normalizedXpath}; load order winner is ${group.winner?.modName ?? "(unknown)"}.`;
   if (traces.some((trace) => trace.status === "missed")) return "Replay could not match at least one operation, so this group uses miss evidence plus conservative fallback grouping.";
   if (traces.some((trace) => trace.status === "unsupported")) return "At least one operation is not replay-supported, so this group is shown from conservative fallback evidence.";
   if (category === "structural" || category === "mixed") return "Structural footprint overlap was grouped conservatively because replay could not prove a single scalar slot.";

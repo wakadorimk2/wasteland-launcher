@@ -52,7 +52,7 @@ function App() {
     <div className="app">
       <div className="titlebar">
         <div className="dots"><span className="dot r" /><span className="dot y" /><span className="dot g" /></div>
-        <span className="title-text">7DTD Mod Conflict Analyzer</span>
+        <span className="title-text">7DTD Mod Conflict Analyzer v2 provenance</span>
         <span className="meta">{model.profile} - {model.mods.length} loaded</span>
       </div>
 
@@ -70,6 +70,7 @@ function App() {
           <button className="btn primary" type="button" disabled title="Disabled: diagnostic UI only">Apply zzz_ patch</button>
         </div>
         {loadError && <div className="notice danger">{loadError}</div>}
+        <div className="notice">Wasteland Launcher UI v2 provenance build - context schema: diagnosticGroups first</div>
         {model.source === "sample" && <div className="notice">No ui/public/context.json found. Showing bundled sample diagnostics.</div>}
         <div className="main-content">
           {view === "dashboard" && <Dashboard model={model} setView={setView} setSelectedConflict={setSelectedConflict} />}

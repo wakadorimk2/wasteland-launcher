@@ -1,13 +1,15 @@
 import { buildSampleModel, buildUiModel } from "./model";
 import type { ContextPack, UiModel } from "./types";
 
-const storedContextKey = "wasteland-launcher.contextPack";
+const storedContextKey = "wasteland-launcher.contextPack.v2";
 
 export async function loadInitialModel(): Promise<UiModel> {
   try {
     const response = await fetch("/context.json", { cache: "no-store" });
-    if (response.ok) {
-      return buildUiModel((await response.json()) as ContextPack, "context");
+    const contentType = response.headers.get("content-type") ?? "";
+    if (response.ok && contentType.includes("application/json")) {
+      const pack = (await response.json()) as ContextPack;
+      if (Array.isArray(pack.diagnosticGroups)) return buildUiModel(pack, "context");
     }
   } catch {
     // Fall through to bundled sample data.

@@ -16,8 +16,29 @@ test("different XPath forms that write the same concrete attribute become one ex
 
     assert.equal(conflicts.length, 1);
     assert.equal(conflicts[0].normalizedXpath, "/items/item[@name='coin']/property[@name='count']/@value");
+    assert.match(conflicts[0].targetKey, /^attr:\d+:value$/);
+    assert.equal(conflicts[0].classification, "silent-overwrite");
+    assert.equal(conflicts[0].confidence, "proven");
     assert.equal(conflicts[0].winner.modName, "B");
     assert.equal(conflicts[0].exact, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("same parent append operations are retained as sibling order dependencies", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items></items>`);
+  try {
+    const { diagnosticGroups } = await detectConflicts([
+      op("A", 1, "items.xml", "/items", "append", `<item name="a"/>`, "xml", "<item a>"),
+      op("B", 2, "items.xml", "/items", "append", `<item name="b"/>`, "xml", "<item b>")
+    ], fixture.gamePath);
+
+    assert.equal(diagnosticGroups.length, 1);
+    assert.equal(diagnosticGroups[0].classification, "sibling-order-dependent");
+    assert.match(diagnosticGroups[0].targetKey, /^children:\d+$/);
+    assert.equal(diagnosticGroups[0].orderDependent, true);
+    assert.equal(diagnosticGroups[0].risk, "warn");
   } finally {
     await fixture.cleanup();
   }

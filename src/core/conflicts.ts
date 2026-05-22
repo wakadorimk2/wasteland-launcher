@@ -1,6 +1,6 @@
 import { buildPatchTrace, defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
 import { extractPatchFootprints, PatchFootprint, PatchFootprintSelector } from "./footprint.js";
-import { ConflictDetectionResult, ConflictGroup, PatchTrace, PatchTraceEffect, XmlPatchOperation } from "./types.js";
+import { ConflictDetectionResult, DiagnosticClassification, DiagnosticConfidence, DiagnosticEvidence, DiagnosticGroup, PatchDiagnosticKind, PatchTrace, PatchTraceEffect, SlotVersion, XmlPatchOperation } from "./types.js";
 import { normalizeXpath } from "./xpath.js";
 
 type ConflictSource = "replay" | "footprint" | "normalized";
@@ -15,9 +15,16 @@ interface OperationEffect {
 interface PendingGroup {
   file: string;
   target: string;
+  targetKey: string;
   operations: XmlPatchOperation[];
+  traces: PatchTrace[];
+  effects: PatchTraceEffect[];
   exact: boolean;
   source: ConflictSource;
+  classification: DiagnosticClassification;
+  kind: PatchDiagnosticKind;
+  confidence: DiagnosticConfidence;
+  orderDependent: boolean;
 }
 
 const scalarEffectKinds = new Set<PatchTraceEffect["kind"]>(["setValue", "setAttribute", "removeAttribute", "appendAttributeText"]);
@@ -38,9 +45,11 @@ export async function detectConflicts(
   const fallbackOperations = operationsNeedingFallback(operations, replay.trace);
   pending.push(...detectFootprintConflicts(fallbackOperations));
   pending.push(...detectNormalizedXpathConflicts(fallbackOperations));
+  const diagnosticGroups = materializeGroups(pending);
 
   return {
-    conflicts: materializeGroups(pending),
+    diagnosticGroups,
+    conflicts: diagnosticGroups,
     trace: replay.trace,
     warnings: replay.warnings
   };
@@ -55,7 +64,7 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
   const scalarByTarget = new Map<string, OperationEffect[]>();
   const structuralByTarget = new Map<string, OperationEffect[]>();
   for (const item of effects) {
-    const key = `${item.operation.file}\0${item.effect.target}`;
+    const key = `${item.operation.file}\0${effectTargetKey(item.effect)}`;
     if (scalarEffectKinds.has(item.effect.kind)) {
       pushMap(scalarByTarget, key, item);
     } else if (structuralEffectKinds.has(item.effect.kind)) {
@@ -64,12 +73,40 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
   }
 
   for (const [key, items] of scalarByTarget) {
-    const [file, target] = splitKey(key);
-    pending.push({ file, target, operations: items.map((item) => item.operation), exact: true, source: "replay" });
+    const [file, targetKey] = splitKey(key);
+    const target = displayTarget(items[0].effect);
+    pending.push(pendingGroup({
+      file,
+      target,
+      targetKey,
+      operations: items.map((item) => item.operation),
+      traces: items.map((item) => item.trace),
+      effects: items.map((item) => item.effect),
+      exact: true,
+      source: "replay",
+      classification: classifyScalarEffects(items.map((item) => item.effect)),
+      kind: classifyScalarEffects(items.map((item) => item.effect)) === "slot-order-dependent" ? "slot-order-dependent" : "silent-overwrite",
+      confidence: "proven",
+      orderDependent: true
+    }));
   }
   for (const [key, items] of structuralByTarget) {
-    const [file, target] = splitKey(key);
-    pending.push({ file, target, operations: items.map((item) => item.operation), exact: true, source: "replay" });
+    const [file, targetKey] = splitKey(key);
+    const target = displayTarget(items[0].effect);
+    pending.push(pendingGroup({
+      file,
+      target,
+      targetKey,
+      operations: items.map((item) => item.operation),
+      traces: items.map((item) => item.trace),
+      effects: items.map((item) => item.effect),
+      exact: true,
+      source: "replay",
+      classification: items.some((item) => item.effect.kind === "removeNode") ? "structural-mask" : "sibling-order-dependent",
+      kind: items.some((item) => item.effect.kind === "removeNode") ? "structural-mask" : "sibling-order-dependent",
+      confidence: "proven",
+      orderDependent: true
+    }));
   }
 
   const removes = effects.filter((item) => item.effect.kind === "removeNode");
@@ -82,13 +119,20 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
         && (scalarEffectKinds.has(item.effect.kind) || structuralEffectKinds.has(item.effect.kind))
       )
       .map((item) => item.operation);
-    pending.push({
+    pending.push(pendingGroup({
       file: remove.operation.file,
       target: remove.effect.target,
+      targetKey: effectTargetKey(remove.effect),
       operations: [remove.operation, ...operationsForRemovedSubtree],
+      traces: [remove.trace, ...effects.filter((item) => operationsForRemovedSubtree.includes(item.operation)).map((item) => item.trace)],
+      effects: [remove.effect, ...effects.filter((item) => operationsForRemovedSubtree.includes(item.operation)).map((item) => item.effect)],
       exact: true,
-      source: "replay"
-    });
+      source: "replay",
+      classification: "structural-mask",
+      kind: "structural-mask",
+      confidence: "proven",
+      orderDependent: true
+    }));
   }
 
   const missed = trace.filter((item) => item.status === "missed");
@@ -100,7 +144,20 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
       const removers = removes
         .filter((item) => item.operation.file === miss.file && item.operation.order < miss.order && targetContains(item.effect.target, missTarget))
         .map((item) => item.operation);
-      pending.push({ file: miss.file, target: missTarget, operations: [...removers, missedOperation], exact: true, source: "replay" });
+      pending.push(pendingGroup({
+        file: miss.file,
+        target: missTarget,
+        targetKey: miss.effects[0]?.targetKey ?? `miss:${miss.file}:${missTarget}`,
+        operations: [...removers, missedOperation],
+        traces: [miss],
+        effects: miss.effects,
+        exact: true,
+        source: "replay",
+        classification: "order-induced-miss",
+        kind: "order-induced-miss",
+        confidence: "proven",
+        orderDependent: true
+      }));
     } else if (miss.diagnosticKind === "dependency-order-miss") {
       const creators = effects
         .filter((item) =>
@@ -110,7 +167,20 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
           && futureStructuralMayCreate(item.effect, missTarget)
         )
         .map((item) => item.operation);
-      pending.push({ file: miss.file, target: missTarget, operations: [missedOperation, ...creators], exact: false, source: "replay" });
+      pending.push(pendingGroup({
+        file: miss.file,
+        target: missTarget,
+        targetKey: miss.effects[0]?.targetKey ?? `miss:${miss.file}:${missTarget}`,
+        operations: [missedOperation, ...creators],
+        traces: [miss],
+        effects: miss.effects,
+        exact: false,
+        source: "replay",
+        classification: "dependency-order-miss",
+        kind: "dependency-order-miss",
+        confidence: "likely",
+        orderDependent: true
+      }));
     }
   }
 
@@ -129,7 +199,20 @@ function detectFootprintConflicts(operations: XmlPatchOperation[]): PendingGroup
   }
   for (const [key, matches] of scalarBySlot) {
     const [file, target] = splitKey(key);
-    pending.push({ file, target, operations: matches.map((match) => match.operation), exact: false, source: "footprint" });
+    pending.push(pendingGroup({
+      file,
+      target,
+      targetKey: `footprint:${file}:${target}`,
+      operations: matches.map((match) => match.operation),
+      traces: [],
+      effects: [],
+      exact: false,
+      source: "footprint",
+      classification: "unknown-risk",
+      kind: "unknown-risk",
+      confidence: "unknown",
+      orderDependent: true
+    }));
   }
 
   for (const remover of footprints) {
@@ -144,7 +227,20 @@ function detectFootprintConflicts(operations: XmlPatchOperation[]): PendingGroup
           operationsForTarget.push(writer.operation);
         }
       }
-      pending.push({ file: remover.file, target: removed.normalizedXpath, operations: operationsForTarget, exact: false, source: "footprint" });
+      pending.push(pendingGroup({
+        file: remover.file,
+        target: removed.normalizedXpath,
+        targetKey: `footprint:${remover.file}:${removed.normalizedXpath}`,
+        operations: operationsForTarget,
+        traces: [],
+        effects: [],
+        exact: false,
+        source: "footprint",
+        classification: "structural-mask",
+        kind: "structural-mask",
+        confidence: "likely",
+        orderDependent: true
+      }));
     }
   }
 
@@ -163,17 +259,24 @@ function detectNormalizedXpathConflicts(operations: XmlPatchOperation[]): Pendin
 
   return [...groups.entries()].map(([key, list]) => {
     const [file, target] = splitKey(key);
-    return {
+    return pendingGroup({
       file,
       target,
+      targetKey: `normalized:${file}:${target}`,
       operations: list,
+      traces: [],
+      effects: [],
       exact: new Set(list.map((item) => item.xpath)).size === 1,
-      source: "normalized" as const
-    };
+      source: "normalized" as const,
+      classification: "unknown-risk",
+      kind: "unknown-risk",
+      confidence: "unknown",
+      orderDependent: true
+    });
   });
 }
 
-function materializeGroups(pending: PendingGroup[]): ConflictGroup[] {
+function materializeGroups(pending: PendingGroup[]): DiagnosticGroup[] {
   const byOperationSet = new Map<string, PendingGroup>();
   const acceptedOperationSetsBySource = new Map<string, ConflictSource[]>();
   const orderedPending = [...pending].sort((a, b) => sourcePriority(a.source) - sourcePriority(b.source));
@@ -194,17 +297,100 @@ function materializeGroups(pending: PendingGroup[]): ConflictGroup[] {
   }
 
   return [...byOperationSet.values()]
-    .map((group) => {
+    .map((group, index) => {
       const operations = uniqueOperations(group.operations).sort((a, b) => a.order - b.order);
+      const primary = operations[operations.length - 1];
+      const operationIds = operations.map(operationId);
       return {
+        id: `dg${index + 1}`,
         file: group.file,
+        kind: group.kind,
+        classification: group.classification,
+        risk: riskForGroup(group),
+        confidence: group.confidence,
+        targetKey: group.targetKey,
+        displayTarget: group.target,
+        operationIds,
         normalizedXpath: group.target,
         operations,
-        winner: operations[operations.length - 1],
+        primaryOpId: operationId(primary),
+        relatedOpIds: operationIds.slice(0, -1),
+        evidence: evidenceFor(group, operations),
+        source: group.source,
+        orderDependent: group.orderDependent,
+        winner: primary,
         exact: group.exact
-      } satisfies ConflictGroup;
+      } satisfies DiagnosticGroup;
     })
     .sort((a, b) => a.file.localeCompare(b.file) || a.normalizedXpath.localeCompare(b.normalizedXpath));
+}
+
+function pendingGroup(group: PendingGroup): PendingGroup {
+  return group;
+}
+
+function effectTargetKey(effect: PatchTraceEffect): string {
+  return effect.targetKey ?? effect.provenance?.slotKey ?? effect.provenance?.childSlot ?? effect.target;
+}
+
+function displayTarget(effect: PatchTraceEffect): string {
+  return effect.displayTarget ?? effect.target;
+}
+
+function classifyScalarEffects(effects: PatchTraceEffect[]): DiagnosticClassification {
+  const kinds = new Set(effects.map((effect) => effect.kind));
+  if (kinds.has("removeAttribute") && (kinds.has("setAttribute") || kinds.has("appendAttributeText"))) return "slot-order-dependent";
+  if (kinds.has("appendAttributeText") && (kinds.has("setAttribute") || kinds.has("setValue"))) return "slot-order-dependent";
+  return "silent-overwrite";
+}
+
+function riskForGroup(group: PendingGroup): DiagnosticGroup["risk"] {
+  if (group.kind === "order-induced-miss" || group.kind === "parse-error") return "critical";
+  if (group.classification === "structural-mask") return "critical";
+  if (group.classification === "silent-overwrite") return "danger";
+  if (group.classification === "slot-order-dependent" || group.classification === "dependency-order-miss") return "warn";
+  if (group.classification === "sibling-order-dependent") return "warn";
+  if (group.classification === "unsupported-operation" || group.classification === "unknown-risk") return "info";
+  return group.exact ? "warn" : "info";
+}
+
+function evidenceFor(group: PendingGroup, operations: XmlPatchOperation[]): DiagnosticEvidence[] {
+  const tracesByOperation = new Map(group.traces.map((trace) => [traceOperationKey(trace), trace]));
+  return operations.map((operation) => {
+    const trace = tracesByOperation.get(operationKey(operation));
+    const effects = trace?.effects ?? [];
+    return {
+      opId: operationId(operation),
+      effects,
+      matchEvents: trace ? [{
+        opId: operationId(operation),
+        targetKey: trace.affectedTargets[0]?.canonical ?? effects[0]?.targetKey,
+        displayTarget: trace.affectedTargets[0]?.canonical ?? effects[0]?.displayTarget ?? effects[0]?.target ?? operation.xpath,
+        matchKind: trace.status === "missed" ? "miss" : trace.status === "unsupported" ? "unsupported" : trace.status === "parseError" ? "parseError" : trace.affectedTargets[0]?.kind === "attribute" ? "attribute" : "node",
+        cardinality: trace.matchCountBefore,
+        confidence: trace.confidence,
+        note: trace.message
+      }] : [],
+      slotVersions: slotVersionsFor(operation, effects),
+      note: trace?.message
+    };
+  });
+}
+
+function slotVersionsFor(operation: XmlPatchOperation, effects: PatchTraceEffect[]): SlotVersion[] {
+  return effects
+    .filter((effect) => scalarEffectKinds.has(effect.kind) && (effect.before != null || effect.after != null))
+    .map((effect) => ({
+      slotKey: effectTargetKey(effect),
+      opId: operationId(operation),
+      before: effect.before,
+      after: effect.after,
+      displayTarget: displayTarget(effect)
+    }));
+}
+
+function operationId(operation: XmlPatchOperation): string {
+  return `${operation.file}:${operation.order}:${operation.line}:${operation.operation}:${operation.xpath}`;
 }
 
 function operationsNeedingFallback(operations: XmlPatchOperation[], trace: PatchTrace[]): XmlPatchOperation[] {

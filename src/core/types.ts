@@ -71,8 +71,79 @@ export interface ConflictGroup {
   exact: boolean;
 }
 
+export type OperationId = string;
+export type TargetKey = string;
+
+export interface OperationIR extends XmlPatchOperation {
+  opId: OperationId;
+  opcode: string;
+  rawXpath: string;
+  sourceLine: number;
+}
+
+export type DiagnosticConfidence = "proven" | "likely" | "unknown";
+export type DiagnosticClassification =
+  | "silent-overwrite"
+  | "slot-order-dependent"
+  | "structural-mask"
+  | "order-induced-miss"
+  | "dependency-order-miss"
+  | "sibling-order-dependent"
+  | "broad-selector-risk"
+  | "unsupported-operation"
+  | "parse-error"
+  | "unknown-risk";
+
+export interface MatchEvent {
+  opId: OperationId;
+  targetKey?: TargetKey;
+  displayTarget: string;
+  matchKind: "node" | "attribute" | "miss" | "unsupported" | "parseError";
+  cardinality: number;
+  confidence: PatchTrace["confidence"];
+  note?: string;
+}
+
+export interface SlotVersion {
+  slotKey: TargetKey;
+  opId: OperationId;
+  before?: string;
+  after?: string;
+  displayTarget: string;
+}
+
+export interface DiagnosticEvidence {
+  opId: OperationId;
+  effects: PatchTraceEffect[];
+  matchEvents: MatchEvent[];
+  slotVersions: SlotVersion[];
+  note?: string;
+}
+
+export interface DiagnosticGroup {
+  id: string;
+  file: string;
+  kind: PatchDiagnosticKind;
+  classification: DiagnosticClassification;
+  risk: "info" | "warn" | "danger" | "critical";
+  confidence: DiagnosticConfidence;
+  targetKey: TargetKey;
+  displayTarget: string;
+  operationIds: OperationId[];
+  operations: XmlPatchOperation[];
+  primaryOpId: OperationId;
+  relatedOpIds: OperationId[];
+  evidence: DiagnosticEvidence[];
+  source: "replay" | "footprint" | "normalized";
+  orderDependent: boolean;
+  winner: XmlPatchOperation;
+  normalizedXpath: string;
+  exact: boolean;
+}
+
 export interface ConflictDetectionResult {
-  conflicts: ConflictGroup[];
+  diagnosticGroups: DiagnosticGroup[];
+  conflicts: DiagnosticGroup[];
   trace: PatchTrace[];
   warnings: ScanWarning[];
 }
@@ -86,10 +157,13 @@ export type PatchDiagnosticKind =
   | "dependency-order-miss"
   | "silent-overwrite"
   | "structural-mask"
+  | "slot-order-dependent"
+  | "sibling-order-dependent"
   | "broad-match-risk"
   | "unsupported-operation"
   | "parse-error"
-  | "ambiguous-target";
+  | "ambiguous-target"
+  | "unknown-risk";
 
 export interface PatchTraceTarget {
   canonical: string;
@@ -101,6 +175,15 @@ export interface PatchTraceTarget {
 export interface PatchTraceEffect {
   kind: "setValue" | "setAttribute" | "removeAttribute" | "appendChild" | "appendAttributeText" | "removeNode" | "insertBefore" | "insertAfter" | "unsupported" | "parseError" | "miss";
   target: string;
+  targetKey?: TargetKey;
+  displayTarget?: string;
+  provenance?: {
+    slotKey?: TargetKey;
+    nodeId?: number;
+    childSlot?: TargetKey;
+    removedByOpId?: OperationId;
+    insertedNodeIds?: number[];
+  };
   before?: string;
   after?: string;
   value?: string;
@@ -142,6 +225,7 @@ export interface ContextPack {
   generatedAt: string;
   scan: ScanResult;
   trace: PatchTrace[];
-  conflicts: ConflictGroup[];
+  diagnosticGroups: DiagnosticGroup[];
+  conflicts: DiagnosticGroup[];
   logs: LogScanResult;
 }

@@ -190,6 +190,13 @@ class ReplayProvenance {
     }
     return false;
   }
+
+  removerFor(canonical: string): XmlPatchOperation | undefined {
+    for (const [removed, operation] of this.removersByCanonicalTarget.entries()) {
+      if (canonical === removed || canonical.startsWith(`${removed}/`)) return operation;
+    }
+    return undefined;
+  }
 }
 
 function replayOperation(
@@ -219,7 +226,15 @@ function replayOperation(
   if (matchCount === 0) {
     const canonical = canonicalFromXpath(operation.xpath);
     const diagnosticKind = provenance.wasRemovedByEarlierPatch(canonical) ? "order-induced-miss" : futureAddsXpathMayCreate(futureAdds, operation.xpath) ? "dependency-order-miss" : "xpath-miss";
-    return baseTrace(operation, "missed", 0, [], [{ kind: "miss", target: canonical, summary: diagnosticKind }], diagnosticKind, "high", diagnosticKind);
+    const remover = provenance.removerFor(canonical);
+    return baseTrace(operation, "missed", 0, [], [{
+      kind: "miss",
+      target: canonical,
+      targetKey: `miss:${operation.file}:${canonical}`,
+      displayTarget: canonical,
+      provenance: remover ? { removedByOpId: operationId(remover) } : undefined,
+      summary: diagnosticKind
+    }], diagnosticKind, "high", diagnosticKind);
   }
 
   const replayNodes = selected.length > broadReplayTargetLimit ? selected.slice(0, broadReplayTargetLimit) : selected;
@@ -272,14 +287,30 @@ function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOp
     const before = node.value ?? "";
     node.value = value;
     return {
-      effect: { kind: "setAttribute", target: target.canonical, before, after: value, value },
+      effect: {
+        kind: "setAttribute",
+        target: target.canonical,
+        targetKey: provenance.attrSlot(node, node.name),
+        displayTarget: target.canonical,
+        before,
+        after: value,
+        value
+      },
       metadata: { scalarWriteSlot: provenance.attrSlot(node, node.name) }
     };
   }
   const before = node.textContent ?? "";
   node.textContent = value;
   return {
-    effect: { kind: "setValue", target: target.canonical, before, after: value, value },
+    effect: {
+      kind: "setValue",
+      target: target.canonical,
+      targetKey: provenance.textSlot(node),
+      displayTarget: target.canonical,
+      before,
+      after: value,
+      value
+    },
     metadata: { scalarWriteSlot: provenance.textSlot(node) }
   };
 }
@@ -290,9 +321,18 @@ function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: X
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.setAttribute(attr, value);
+  const slotKey = provenance.attrSlot(element, attr);
   return {
-    effect: { kind: "setAttribute", target: `${target.nodeRef}/@${attr}`, before, after: value, value },
-    metadata: { scalarWriteSlot: provenance.attrSlot(element, attr) }
+    effect: {
+      kind: "setAttribute",
+      target: `${target.nodeRef}/@${attr}`,
+      targetKey: slotKey,
+      displayTarget: `${target.nodeRef}/@${attr}`,
+      before,
+      after: value,
+      value
+    },
+    metadata: { scalarWriteSlot: slotKey }
   };
 }
 
@@ -301,9 +341,17 @@ function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.removeAttribute(attr);
+  const slotKey = provenance.attrSlot(element, attr);
   return {
-    effect: { kind: "removeAttribute", target: `${target.nodeRef}/@${attr}`, before, after: undefined },
-    metadata: { scalarWriteSlot: provenance.attrSlot(element, attr) }
+    effect: {
+      kind: "removeAttribute",
+      target: `${target.nodeRef}/@${attr}`,
+      targetKey: slotKey,
+      displayTarget: `${target.nodeRef}/@${attr}`,
+      before,
+      after: undefined
+    },
+    metadata: { scalarWriteSlot: slotKey }
   };
 }
 
@@ -312,18 +360,37 @@ function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatc
     const before = node.value ?? "";
     const after = `${before}${operation.valueText ?? ""}`;
     node.value = after;
+    const slotKey = provenance.attrSlot(node, node.name);
     return {
-      effect: { kind: "appendAttributeText", target: target.canonical, before, after, value: operation.valueSummary ?? operation.valueText },
-      metadata: { scalarWriteSlot: provenance.attrSlot(node, node.name) }
+      effect: {
+        kind: "appendAttributeText",
+        target: target.canonical,
+        targetKey: slotKey,
+        displayTarget: target.canonical,
+        before,
+        after,
+        value: operation.valueSummary ?? operation.valueText
+      },
+      metadata: { scalarWriteSlot: slotKey }
     };
   }
   const nodes = cloneFragmentNodes(templates);
   for (const child of nodes) {
     node.appendChild(child);
   }
+  const childSlot = provenance.childSlot(node);
+  const insertedNodeIds = nodes.map((child) => provenance.nodeId(child));
   return {
-    effect: { kind: "appendChild", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} child node(s)` },
-    metadata: { childSlot: provenance.childSlot(node), insertedNodeIds: nodes.map((child) => provenance.nodeId(child)) }
+    effect: {
+      kind: "appendChild",
+      target: target.canonical,
+      targetKey: childSlot,
+      displayTarget: target.canonical,
+      provenance: { childSlot, insertedNodeIds },
+      value: operation.valueSummary ?? operation.valueText,
+      summary: `${nodes.length} child node(s)`
+    },
+    metadata: { childSlot, insertedNodeIds }
   };
 }
 
@@ -337,7 +404,14 @@ function applyRemove(node: DomNode, target: PatchTraceTarget, provenance: Replay
     node.parentNode?.removeChild(node);
   }
   return {
-    effect: { kind: "removeNode", target: target.canonical, before },
+    effect: {
+      kind: "removeNode",
+      target: target.canonical,
+      targetKey: `node:${removed.nodeId}`,
+      displayTarget: target.canonical,
+      provenance: { nodeId: removed.nodeId },
+      before
+    },
     metadata: { removed }
   };
 }
@@ -351,9 +425,19 @@ function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatc
   for (const child of nodes) {
     parent.insertBefore(child, before ? node : node.nextSibling);
   }
+  const childSlot = provenance.childSlot(parent);
+  const insertedNodeIds = nodes.map((child) => provenance.nodeId(child));
   return {
-    effect: { kind: before ? "insertBefore" : "insertAfter", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} sibling node(s)` },
-    metadata: { childSlot: provenance.childSlot(parent), insertedNodeIds: nodes.map((child) => provenance.nodeId(child)) }
+    effect: {
+      kind: before ? "insertBefore" : "insertAfter",
+      target: target.canonical,
+      targetKey: childSlot,
+      displayTarget: target.canonical,
+      provenance: { childSlot, insertedNodeIds },
+      value: operation.valueSummary ?? operation.valueText,
+      summary: `${nodes.length} sibling node(s)`
+    },
+    metadata: { childSlot, insertedNodeIds }
   };
 }
 
@@ -385,6 +469,10 @@ function baseTrace(
     diagnosticKind,
     message
   };
+}
+
+function operationId(operation: XmlPatchOperation): string {
+  return `${operation.file}:${operation.order}:${operation.line}:${operation.operation}:${operation.xpath}`;
 }
 
 function parseXml(text: string): XmlDocument {

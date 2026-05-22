@@ -1,5 +1,5 @@
 export type Risk = "safe" | "info" | "warn" | "danger" | "critical";
-export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ambiguous-target" | "ok";
+export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "slot-order-dependent" | "sibling-order-dependent" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ambiguous-target" | "unknown-risk" | "ok";
 export type ConflictCategory = "value" | "structural" | "mixed";
 export type LayoutMode = "3-column" | "unified" | "timeline";
 export type ViewId = "dashboard" | "load-order" | "xml-browser" | "conflict" | "settings";
@@ -47,6 +47,15 @@ export interface PatchTraceTarget {
 export interface PatchTraceEffect {
   kind: string;
   target: string;
+  targetKey?: string;
+  displayTarget?: string;
+  provenance?: {
+    slotKey?: string;
+    nodeId?: number;
+    childSlot?: string;
+    removedByOpId?: string;
+    insertedNodeIds?: number[];
+  };
   before?: string;
   after?: string;
   value?: string;
@@ -73,10 +82,29 @@ export interface PatchTrace {
 }
 
 export interface ConflictGroup {
+  id?: string;
   file: string;
+  kind?: ConflictKind;
+  classification?: string;
+  risk?: Risk;
+  confidence?: "proven" | "likely" | "unknown";
+  targetKey?: string;
+  displayTarget?: string;
+  operationIds?: string[];
   normalizedXpath: string;
   operations: XmlPatchOperation[];
-  winner: XmlPatchOperation;
+  primaryOpId?: string;
+  relatedOpIds?: string[];
+  evidence?: {
+    opId: string;
+    effects: PatchTraceEffect[];
+    matchEvents: unknown[];
+    slotVersions: unknown[];
+    note?: string;
+  }[];
+  source?: "replay" | "footprint" | "normalized";
+  orderDependent?: boolean;
+  winner?: XmlPatchOperation;
   exact: boolean;
 }
 
@@ -94,6 +122,7 @@ export interface ContextPack {
     warnings: { kind: string; message: string; modName?: string; path?: string }[];
   };
   trace: PatchTrace[];
+  diagnosticGroups?: ConflictGroup[];
   conflicts: ConflictGroup[];
   logs: {
     latestLogPath?: string;

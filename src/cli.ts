@@ -48,10 +48,10 @@ addMo2Options(program.command("conflicts").description("Report XML patch conflic
       timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000
     });
     if (wantsJson(options)) {
-      printJson(detection.conflicts);
+      printJson(detection.diagnosticGroups);
       return;
     }
-    printConflicts(detection.conflicts);
+    printConflicts(detection.diagnosticGroups);
   });
 
 addMo2Options(program.command("logs")
@@ -133,13 +133,16 @@ function printScan(scan: Awaited<ReturnType<typeof scanMo2>>): void {
 }
 
 function printConflicts(conflicts: Awaited<ReturnType<typeof detectConflicts>>["conflicts"]): void {
-  console.log(`Conflict groups: ${conflicts.length}`);
+  console.log(`Diagnostic groups: ${conflicts.length}`);
   console.table(conflicts.slice(0, 120).map((group) => ({
     file: group.file,
-    xpath: group.normalizedXpath,
+    target: group.displayTarget,
+    classification: group.classification,
+    confidence: group.confidence,
+    risk: group.risk,
     mods: [...new Set(group.operations.map((operation) => operation.modName))].join(" -> "),
-    winner: group.winner.modName,
-    exact: group.exact
+    primary: group.winner?.modName ?? group.primaryOpId,
+    source: group.source
   })));
 }
 

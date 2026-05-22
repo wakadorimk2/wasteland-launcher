@@ -18,8 +18,10 @@ test("replay trace normalizes set and setattribute to the same attribute target"
 
     assert.equal(warnings.filter((warning) => warning.kind.includes("miss")).length, 0);
     assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/property[@name='count']/@value");
+    assert.match(trace[0].effects[0].targetKey ?? "", /^attr:\d+:value$/);
     assert.equal(trace[0].effects[0].after, "120");
     assert.equal(trace[1].effects[0].target, trace[0].effects[0].target);
+    assert.equal(trace[1].effects[0].targetKey, trace[0].effects[0].targetKey);
     assert.equal(trace[1].effects[0].before, "120");
     assert.equal(trace[1].effects[0].after, "160");
     assert.equal(trace[1].diagnosticKind, "silent-overwrite");
@@ -203,8 +205,10 @@ test("remove followed by a later XPath reference becomes order-induced-miss", as
     ], fixture.gamePath);
 
     assert.equal(trace[0].effects[0].kind, "removeNode");
+    assert.match(trace[0].effects[0].targetKey ?? "", /^node:\d+$/);
     assert.equal(trace[1].status, "missed");
     assert.equal(trace[1].diagnosticKind, "order-induced-miss");
+    assert.equal(trace[1].effects[0].provenance?.removedByOpId, "items.xml:1:1:remove:/items/item[@name='old']");
   } finally {
     await fixture.cleanup();
   }
