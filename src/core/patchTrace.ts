@@ -12,6 +12,8 @@ const broadReplayTargetLimit = 100;
 
 type XmlDocument = ReturnType<DOMParser["parseFromString"]>;
 type DomNode = any;
+type NodeId = number;
+type SlotKey = string;
 type AttrCondition = { attr: string; value: string; op: "equals" | "contains" | "startsWith" };
 type AttrPredicate = AttrCondition[][];
 type ChildCondition = { tag: string; attrs: AttrCondition[] };
@@ -21,6 +23,18 @@ interface SimpleXPath {
   mode: "absolute" | "descendant";
   steps: SimpleXPathStep[];
   attribute?: string;
+}
+
+interface ReplayEffectMetadata {
+  scalarWriteSlot?: SlotKey;
+  removed?: { nodeId: NodeId; canonicalTarget: string };
+  insertedNodeIds?: NodeId[];
+  childSlot?: SlotKey;
+}
+
+interface AppliedPatchEffect {
+  effect: PatchTraceEffect;
+  metadata?: ReplayEffectMetadata;
 }
 
 export interface TraceOptions {
@@ -71,8 +85,7 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
       continue;
     }
 
-    const previouslyRemoved = new Set<string>();
-    const previousScalarWrites = new Set<string>();
+    const provenance = new ReplayProvenance();
     const futureAdds = collectFutureAdds(fileOperations);
     const sortedOperations = sortOperations(fileOperations);
     const replayIndex = new XmlReplayIndex(document);
@@ -81,16 +94,10 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
         pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(operationIndex), fileIndex + 1, fileEntries.length, Date.now() - startedAt);
         break;
       }
-      const item = replayOperation(document, operation, previouslyRemoved, futureAdds, previousScalarWrites, replayIndex, options.mode ?? "fast");
+      const item = replayOperation(document, operation, provenance, futureAdds, replayIndex, options.mode ?? "fast");
       trace.push(item);
       let indexDirty = false;
       for (const effect of item.effects) {
-        if (effect.kind === "removeNode") {
-          previouslyRemoved.add(effect.target);
-        }
-        if (effect.kind === "setValue" || effect.kind === "setAttribute" || effect.kind === "removeAttribute" || effect.kind === "appendAttributeText") {
-          previousScalarWrites.add(effect.target);
-        }
         if (effectMayAffectIndex(effect)) {
           indexDirty = true;
         }
@@ -120,12 +127,76 @@ function pushBudgetSkipped(trace: PatchTrace[], warnings: ScanWarning[], file: s
   }
 }
 
+class ReplayProvenance {
+  private nextNodeId = 1;
+  private readonly nodeIds = new WeakMap<object, NodeId>();
+  private readonly lastScalarWriter = new Map<SlotKey, XmlPatchOperation>();
+  private readonly removersByCanonicalTarget = new Map<string, XmlPatchOperation>();
+  private readonly insertersByNodeId = new Map<NodeId, XmlPatchOperation>();
+  private readonly insertersByChildSlot = new Map<SlotKey, XmlPatchOperation>();
+
+  nodeId(node: DomNode): NodeId {
+    const key = node as object;
+    const existing = this.nodeIds.get(key);
+    if (existing) return existing;
+    const id = this.nextNodeId;
+    this.nextNodeId += 1;
+    this.nodeIds.set(key, id);
+    return id;
+  }
+
+  textSlot(node: DomNode): SlotKey {
+    return `text:${this.nodeId(node)}`;
+  }
+
+  attrSlot(node: DomNode, attributeName: string): SlotKey {
+    const element = node.nodeType === 2 ? node.ownerElement : node;
+    return `attr:${this.nodeId(element ?? node)}:${attributeName}`;
+  }
+
+  childSlot(parent: DomNode): SlotKey {
+    return `children:${this.nodeId(parent)}`;
+  }
+
+  record(applied: AppliedPatchEffect, operation: XmlPatchOperation): void {
+    const metadata = applied.metadata;
+    if (!metadata) return;
+    if (metadata.scalarWriteSlot) {
+      this.lastScalarWriter.set(metadata.scalarWriteSlot, operation);
+    }
+    if (metadata.removed) {
+      this.removersByCanonicalTarget.set(metadata.removed.canonicalTarget, operation);
+    }
+    if (metadata.childSlot) {
+      this.insertersByChildSlot.set(metadata.childSlot, operation);
+    }
+    for (const nodeId of metadata.insertedNodeIds ?? []) {
+      this.insertersByNodeId.set(nodeId, operation);
+    }
+  }
+
+  overwritesPreviousScalar(appliedEffects: AppliedPatchEffect[]): boolean {
+    return appliedEffects.some(({ effect, metadata }) =>
+      (effect.kind === "setValue" || effect.kind === "setAttribute")
+      && metadata?.scalarWriteSlot != null
+      && this.lastScalarWriter.has(metadata.scalarWriteSlot)
+      && effect.before !== effect.after
+    );
+  }
+
+  wasRemovedByEarlierPatch(canonical: string): boolean {
+    for (const removed of this.removersByCanonicalTarget.keys()) {
+      if (canonical === removed || canonical.startsWith(`${removed}/`)) return true;
+    }
+    return false;
+  }
+}
+
 function replayOperation(
   document: XmlDocument,
   operation: XmlPatchOperation,
-  previouslyRemoved: Set<string>,
+  provenance: ReplayProvenance,
   futureAdds: Set<string>,
-  previousScalarWrites: Set<string>,
   index: XmlReplayIndex,
   mode: TraceOptions["mode"]
 ): PatchTrace {
@@ -147,40 +218,47 @@ function replayOperation(
   const matchCount = selected.length;
   if (matchCount === 0) {
     const canonical = canonicalFromXpath(operation.xpath);
-    const diagnosticKind = wasRemovedByEarlierPatch(previouslyRemoved, canonical) ? "order-induced-miss" : futureAddsXpathMayCreate(futureAdds, operation.xpath) ? "dependency-order-miss" : "xpath-miss";
+    const diagnosticKind = provenance.wasRemovedByEarlierPatch(canonical) ? "order-induced-miss" : futureAddsXpathMayCreate(futureAdds, operation.xpath) ? "dependency-order-miss" : "xpath-miss";
     return baseTrace(operation, "missed", 0, [], [{ kind: "miss", target: canonical, summary: diagnosticKind }], diagnosticKind, "high", diagnosticKind);
   }
 
   const replayNodes = selected.length > broadReplayTargetLimit ? selected.slice(0, broadReplayTargetLimit) : selected;
   const targets = replayNodes.map((node) => targetFor(node, operation.xpath));
   const effects: PatchTraceEffect[] = [];
+  const appliedEffects: AppliedPatchEffect[] = [];
   const op = operation.operation.toLowerCase();
   const fragmentTemplates = op === "append" || op === "insertbefore" || op === "insertafter" ? fragmentNodes(document, operation.valueText) : undefined;
 
   for (const node of replayNodes) {
     const target = targetFor(node, operation.xpath);
+    let applied: AppliedPatchEffect;
     if (op === "set") {
-      effects.push(applySet(node, target, operation));
+      applied = applySet(node, target, operation, provenance);
     } else if (op === "setattribute") {
-      effects.push(applySetAttribute(node, target, operation));
+      applied = applySetAttribute(node, target, operation, provenance);
     } else if (op === "removeattribute") {
-      effects.push(applyRemoveAttribute(node, target, operation));
+      applied = applyRemoveAttribute(node, target, operation, provenance);
     } else if (op === "append") {
-      effects.push(applyAppend(node, target, operation, fragmentTemplates ?? []));
+      applied = applyAppend(node, target, operation, fragmentTemplates ?? [], provenance);
     } else if (op === "remove") {
-      effects.push(applyRemove(node, target));
+      applied = applyRemove(node, target, provenance);
     } else if (op === "insertbefore" || op === "insertafter") {
-      effects.push(applyInsert(node, target, operation, op === "insertbefore", fragmentTemplates ?? []));
+      applied = applyInsert(node, target, operation, op === "insertbefore", fragmentTemplates ?? [], provenance);
     } else {
-      effects.push({ kind: "unsupported", target: target.canonical, summary: `${operation.operation} replay is not implemented` });
+      applied = { effect: { kind: "unsupported", target: target.canonical, summary: `${operation.operation} replay is not implemented` } };
     }
+    effects.push(applied.effect);
+    appliedEffects.push(applied);
   }
 
   const diagnosticKind = effects.some((effect) => effect.kind === "unsupported")
     ? "unsupported-operation"
     : matchCount > 1
       ? "broad-match-risk"
-      : overwritesPreviousScalar(effects, previousScalarWrites) ? "silent-overwrite" : "ok";
+      : provenance.overwritesPreviousScalar(appliedEffects) ? "silent-overwrite" : "ok";
+  for (const applied of appliedEffects) {
+    provenance.record(applied, operation);
+  }
   const status = diagnosticKind === "unsupported-operation" ? "unsupported" : matchCount > 1 ? "ambiguous" : "applied";
   const message = matchCount > broadReplayTargetLimit
     ? `${diagnosticKind}; replay sampled ${broadReplayTargetLimit} of ${matchCount} matched target(s)`
@@ -188,69 +266,95 @@ function replayOperation(
   return baseTrace(operation, status, matchCount, targets, effects, diagnosticKind, matchCount > 1 ? "medium" : "high", message);
 }
 
-function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation): PatchTraceEffect {
+function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
   const value = operation.valueText ?? "";
   if (node.nodeType === 2) {
     const before = node.value ?? "";
     node.value = value;
-    return { kind: "setAttribute", target: target.canonical, before, after: value, value };
+    return {
+      effect: { kind: "setAttribute", target: target.canonical, before, after: value, value },
+      metadata: { scalarWriteSlot: provenance.attrSlot(node, node.name) }
+    };
   }
   const before = node.textContent ?? "";
   node.textContent = value;
-  return { kind: "setValue", target: target.canonical, before, after: value, value };
+  return {
+    effect: { kind: "setValue", target: target.canonical, before, after: value, value },
+    metadata: { scalarWriteSlot: provenance.textSlot(node) }
+  };
 }
 
-function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation): PatchTraceEffect {
+function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
   const attr = operation.attributes?.name ?? operation.attributes?.attribute ?? attributeNameFromXpath(operation.xpath) ?? "value";
   const value = operation.attributes?.value ?? operation.valueText ?? "";
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.setAttribute(attr, value);
-  return { kind: "setAttribute", target: `${target.nodeRef}/@${attr}`, before, after: value, value };
+  return {
+    effect: { kind: "setAttribute", target: `${target.nodeRef}/@${attr}`, before, after: value, value },
+    metadata: { scalarWriteSlot: provenance.attrSlot(element, attr) }
+  };
 }
 
-function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation): PatchTraceEffect {
+function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
   const attr = operation.attributes?.name ?? operation.attributes?.attribute ?? attributeNameFromXpath(operation.xpath) ?? "value";
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.removeAttribute(attr);
-  return { kind: "removeAttribute", target: `${target.nodeRef}/@${attr}`, before, after: undefined };
+  return {
+    effect: { kind: "removeAttribute", target: `${target.nodeRef}/@${attr}`, before, after: undefined },
+    metadata: { scalarWriteSlot: provenance.attrSlot(element, attr) }
+  };
 }
 
-function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, templates: DomNode[]): PatchTraceEffect {
+function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, templates: DomNode[], provenance: ReplayProvenance): AppliedPatchEffect {
   if (node.nodeType === 2) {
     const before = node.value ?? "";
     const after = `${before}${operation.valueText ?? ""}`;
     node.value = after;
-    return { kind: "appendAttributeText", target: target.canonical, before, after, value: operation.valueSummary ?? operation.valueText };
+    return {
+      effect: { kind: "appendAttributeText", target: target.canonical, before, after, value: operation.valueSummary ?? operation.valueText },
+      metadata: { scalarWriteSlot: provenance.attrSlot(node, node.name) }
+    };
   }
   const nodes = cloneFragmentNodes(templates);
   for (const child of nodes) {
     node.appendChild(child);
   }
-  return { kind: "appendChild", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} child node(s)` };
+  return {
+    effect: { kind: "appendChild", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} child node(s)` },
+    metadata: { childSlot: provenance.childSlot(node), insertedNodeIds: nodes.map((child) => provenance.nodeId(child)) }
+  };
 }
 
-function applyRemove(node: DomNode, target: PatchTraceTarget): PatchTraceEffect {
+function applyRemove(node: DomNode, target: PatchTraceTarget, provenance: ReplayProvenance): AppliedPatchEffect {
   const before = node.nodeType === 2 ? node.value : serializer.serializeToString(node);
+  const removedNode = node.nodeType === 2 ? node.ownerElement ?? node : node;
+  const removed = { nodeId: provenance.nodeId(removedNode), canonicalTarget: target.canonical };
   if (node.nodeType === 2) {
     node.ownerElement?.removeAttribute(node.name);
   } else {
     node.parentNode?.removeChild(node);
   }
-  return { kind: "removeNode", target: target.canonical, before };
+  return {
+    effect: { kind: "removeNode", target: target.canonical, before },
+    metadata: { removed }
+  };
 }
 
-function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean, templates: DomNode[]): PatchTraceEffect {
+function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean, templates: DomNode[], provenance: ReplayProvenance): AppliedPatchEffect {
   const nodes = cloneFragmentNodes(templates);
   const parent = node.parentNode;
   if (!parent) {
-    return { kind: "unsupported", target: target.canonical, summary: "target has no parent" };
+    return { effect: { kind: "unsupported", target: target.canonical, summary: "target has no parent" } };
   }
   for (const child of nodes) {
     parent.insertBefore(child, before ? node : node.nextSibling);
   }
-  return { kind: before ? "insertBefore" : "insertAfter", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} sibling node(s)` };
+  return {
+    effect: { kind: before ? "insertBefore" : "insertAfter", target: target.canonical, value: operation.valueSummary ?? operation.valueText, summary: `${nodes.length} sibling node(s)` },
+    metadata: { childSlot: provenance.childSlot(parent), insertedNodeIds: nodes.map((child) => provenance.nodeId(child)) }
+  };
 }
 
 function baseTrace(
@@ -692,17 +796,6 @@ function futureAddsXpathMayCreate(futureAdds: Set<string>, xpathValue: string): 
     if (xpathValue.includes(`'${name}'`) || xpathValue.includes(`"${name}"`)) return true;
   }
   return false;
-}
-
-function wasRemovedByEarlierPatch(previouslyRemoved: Set<string>, canonical: string): boolean {
-  for (const removed of previouslyRemoved) {
-    if (canonical === removed || canonical.startsWith(`${removed}/`)) return true;
-  }
-  return false;
-}
-
-function overwritesPreviousScalar(effects: PatchTraceEffect[], previousScalarWrites: Set<string>): boolean {
-  return effects.some((effect) => (effect.kind === "setValue" || effect.kind === "setAttribute") && previousScalarWrites.has(effect.target) && effect.before !== effect.after);
 }
 
 function textSummary(value: string): string {

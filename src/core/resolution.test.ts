@@ -28,6 +28,25 @@ test("replay trace normalizes set and setattribute to the same attribute target"
   }
 });
 
+test("same concrete attribute slot overwrites across different XPath forms", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin"><property name="count" value="10"/></item></items>`);
+  try {
+    const operations = [
+      op("A", 1, "items.xml", "//property[@name='count']/@value", "set", "120"),
+      op("B", 2, "items.xml", "/items/item[property[@name='count']]/property[@name='count']", "setattribute", "160", "text", "160", { name: "value", value: "160" })
+    ];
+
+    const { trace } = await buildPatchTrace(operations, fixture.gamePath, { mode: "fast" });
+
+    assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/property[@name='count']/@value");
+    assert.equal(trace[1].effects[0].target, trace[0].effects[0].target);
+    assert.equal(trace[1].effects[0].before, "120");
+    assert.equal(trace[1].diagnosticKind, "silent-overwrite");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("simple XPath set changes an attribute target in fast mode", async () => {
   const fixture = await makeGameFixture("items.xml", `<items><item name="coin"><property name="count" value="10"/></item></items>`);
   try {
@@ -76,6 +95,26 @@ test("removeattribute emits an attribute deletion effect", async () => {
   }
 });
 
+test("setattribute after removeattribute uses the same scalar slot writer", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" tags="money"/></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='coin']", "removeattribute", undefined, "target", "remove tags", { name: "tags" }),
+      op("B", 2, "items.xml", "/items/item[@name='coin']", "setattribute", "quest", "text", "quest", { name: "tags", value: "quest" })
+    ], fixture.gamePath);
+
+    assert.equal(trace[0].effects[0].kind, "removeAttribute");
+    assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/@tags");
+    assert.equal(trace[1].effects[0].kind, "setAttribute");
+    assert.equal(trace[1].effects[0].target, "/items/item[@name='coin']/@tags");
+    assert.equal(trace[1].effects[0].before, undefined);
+    assert.equal(trace[1].effects[0].after, "quest");
+    assert.equal(trace[1].diagnosticKind, "silent-overwrite");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("append handles element and attribute targets", async () => {
   const fixture = await makeGameFixture("items.xml", `<items><item name="coin" tags="money"/></items>`);
   try {
@@ -89,6 +128,31 @@ test("append handles element and attribute targets", async () => {
     assert.equal(trace[1].effects[0].kind, "appendAttributeText");
     assert.equal(trace[1].effects[0].before, "money");
     assert.equal(trace[1].effects[0].after, "money,quest");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("insert operations update fast-path targets for later XPath lookups", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="anchor" value="0"/></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='anchor']", "insertbefore", `<item name="before" value="1"/>`, "xml", "<item before>"),
+      op("B", 2, "items.xml", "/items/item[@name='before']/@value", "set", "2"),
+      op("C", 3, "items.xml", "/items/item[@name='anchor']", "insertafter", `<item name="after" value="3"/>`, "xml", "<item after>"),
+      op("D", 4, "items.xml", "/items/item[@name='after']/@value", "set", "4")
+    ], fixture.gamePath, { mode: "fast" });
+
+    assert.equal(trace[0].effects[0].kind, "insertBefore");
+    assert.equal(trace[1].status, "applied");
+    assert.equal(trace[1].effects[0].target, "/items/item[@name='before']/@value");
+    assert.equal(trace[1].effects[0].before, "1");
+    assert.equal(trace[1].effects[0].after, "2");
+    assert.equal(trace[2].effects[0].kind, "insertAfter");
+    assert.equal(trace[3].status, "applied");
+    assert.equal(trace[3].effects[0].target, "/items/item[@name='after']/@value");
+    assert.equal(trace[3].effects[0].before, "3");
+    assert.equal(trace[3].effects[0].after, "4");
   } finally {
     await fixture.cleanup();
   }
@@ -141,6 +205,23 @@ test("remove followed by a later XPath reference becomes order-induced-miss", as
     assert.equal(trace[0].effects[0].kind, "removeNode");
     assert.equal(trace[1].status, "missed");
     assert.equal(trace[1].diagnosticKind, "order-induced-miss");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("removed subtree attribute XPath miss is attributed to the remover ledger", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old"><property name="value" value="1"/></item></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='old']/property[@name='value']", "remove"),
+      op("B", 2, "items.xml", "/items/item[@name='old']/property[@name='value']/@value", "set", "2")
+    ], fixture.gamePath, { mode: "fast" });
+
+    assert.equal(trace[0].effects[0].kind, "removeNode");
+    assert.equal(trace[1].status, "missed");
+    assert.equal(trace[1].diagnosticKind, "order-induced-miss");
+    assert.equal(trace[1].effects[0].target, "/items/item[@name='old']/property[@name='value']/@value");
   } finally {
     await fixture.cleanup();
   }
