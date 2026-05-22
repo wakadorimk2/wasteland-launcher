@@ -11,22 +11,36 @@ node dist/cli.js scan --mo2 C:\Modding\MO2 --profile Default
 node dist/cli.js conflicts --mo2 C:\Modding\MO2 --profile Default --game "C:\Program Files (x86)\Steam\steamapps\common\7 Days To Die"
 node dist/cli.js logs --latest
 node dist/cli.js inventory --mo2 C:\Modding\MO2 --profile Default --waka
-node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out _analysis\wasteland-context.json
-node dist/cli.js visualize --input _analysis\wasteland-context.json --out _analysis\wasteland-report.html
+node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out ui\public\context.json
 ```
 
-All commands accept `--json` except `context-pack`, which already emits JSON or writes it to `--out`, and `visualize`, which emits HTML or writes it to `--out`.
+All commands accept `--json` except `context-pack`, which already emits JSON or writes it to `--out`.
 
 ## React UI
 
-The `ui/` app is a local diagnostic viewer for `context-pack` JSON. It does not write to MO2, the game install, a dedicated server, or a remote PC.
+The `ui/` app is the supported local diagnostic viewer for `context-pack` JSON. It does not write to MO2, the game install, a dedicated server, or a remote PC.
 
 ```powershell
 node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out ui\public\context.json
 npm run ui:dev
 ```
 
-If `ui/public/context.json` is absent, the app loads bundled sample diagnostics. You can also load a `context-pack` JSON file from the toolbar. `Rescan` and `Apply zzz_ patch` are non-destructive placeholders in this first UI pass.
+Generate `ui/public/context.json` first, then start the Vite UI. The app auto-loads `ui/public/context.json` when that file exists. If it is absent, the app loads bundled sample diagnostics. You can also choose `Load JSON` in the toolbar and select the same `ui/public/context.json` file, or another `context-pack` JSON file.
+
+The Dashboard summarizes the current pack:
+
+- `Conflict groups`: reviewable groups derived from `ContextPack.conflicts`, after the React derived model suppresses low-value coexistence cases.
+- `Exact replay-proven`: groups where replay effects proved a concrete shared target.
+- `Fallback`: conservative groups from footprint or normalized XPath evidence when exact replay evidence was unavailable.
+- `Replay warnings`: non-ok trace diagnostics such as misses, unsupported operations, parse errors, broad matches, or budget-limited traces.
+
+The Diagnostics view is the main Phase 3 conflict viewer. It reads `ContextPack.conflicts` first, joins each operation to replay evidence from `ContextPack.trace`, and shows the winner, operation timeline, and evidence pane. Plain `append` changes against the same parent slot usually coexist in 7 Days to Die XML patches, so append-only additions are suppressed from review unless replay diagnostics, remove operations, anchored inserts, or scalar target collisions make the group worth inspecting.
+
+For cache-busting or a production-build check, you can preview a built UI on an alternate local port:
+
+```powershell
+npm run ui:preview -- --host 127.0.0.1 --port 5182 --strictPort
+```
 
 ## Current Scope
 
@@ -36,7 +50,6 @@ If `ui/public/context.json` is absent, the app loads bundled sample diagnostics.
 - Records DLL filename, size, modified time, and SHA-256 hash.
 - Reports XML patch conflicts from replayed effects, with conservative XPath fallback when vanilla XML cannot be replayed.
 - Reads the latest non-empty client log from `%APPDATA%\7DaysToDie\logs`.
-- Renders a static, self-contained HTML conflict dashboard from a context-pack JSON file.
+- Shows Phase 3 conflict groups in the React UI from `ContextPack.conflicts`, enriched with `ContextPack.trace` replay evidence.
 
 The MVP does not write to MO2, the game install, a dedicated server, or a remote notebook server. The only write path is `context-pack --out`.
-`visualize --out` also writes only to the explicitly requested HTML report path.

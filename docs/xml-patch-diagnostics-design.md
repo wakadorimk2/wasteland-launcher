@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted as a design direction. This note documents how XML patch diagnostics should evolve before changing the public CLI, JSON schema, or UI contracts.
+Accepted as the design direction, with Phase 1 through Phase 3 partially implemented. This note documents both the intended semantics and the current implementation boundaries for XML patch diagnostics.
 
 ## Context
 
 `wasteland-launcher` inspects 7 Days to Die / MO2 workspaces without writing to MO2, the game install, a dedicated server, or a remote PC. XML patch diagnostics therefore need to explain likely patch interactions from available files while keeping analysis read-only and predictable.
 
-The current implementation already extracts XML patch operations, groups simple conflicts, and can replay many operations against vanilla XML. The next design step is to make the diagnostic model explicit so that future implementation choices converge on the same semantics.
+The current implementation already extracts XML patch operations, derives static footprints, replays many operations against vanilla XML, and builds Phase 3 conflict groups for the React UI. The remaining design work is to keep the diagnostic model explicit so future implementation choices converge on the same semantics.
 
 ## Problem Model
 
@@ -46,7 +46,9 @@ The current IR for scanned patches is `XmlPatchOperation[]` in `src/core/types.t
 
 `PatchTrace` in `src/core/types.ts` is the current exact replay trace shape. `buildPatchTrace` in `src/core/patchTrace.ts` groups operations by XML file, loads the vanilla file from `Data/Config`, evaluates XPath in `fast` or `exact` mode, applies supported operations to an in-memory DOM, and records targets, effects, status, diagnostic kind, and confidence.
 
-`detectConflicts` in `src/core/conflicts.ts` is intentionally simpler. It groups operations by same file plus normalized XPath string, then reports groups touched by multiple mods and the last load-order winner. This is useful as a cheap first pass, but it is not the truth model for XML effects because different XPath strings can select the same node, and identical XPath strings can have different effects depending on prior patches.
+`extractPatchFootprints` in `src/core/footprint.ts` is the current Phase 1 static approximation. It extracts read selectors, written scalar slots, removed node selectors, inserted child slots, and a supported / broad / unknown precision marker without changing the public context-pack schema.
+
+`detectConflicts` in `src/core/conflicts.ts` now combines three sources. It prefers replay effect overlap, uses footprint overlap for fallback candidates, and keeps normalized XPath grouping as the final conservative fallback. `ContextPack.conflicts` is the primary input for the React conflict viewer. `ContextPack.trace` remains the evidence source used to explain replay status, effects, warnings, and confidence.
 
 The current replay loop already contains the beginning of a provenance ledger:
 
@@ -58,11 +60,22 @@ These sets should be treated as early, lightweight provenance state rather than 
 
 The existing `fast` / `exact` trace modes are also a useful architectural entry point. `fast` can host static or indexed approximations, while `exact` should preserve DOM/XPath replay semantics when precision is needed.
 
+The legacy standalone HTML report path has been retired. The React UI is the formal visualization surface for conflict groups, replay evidence, load order, and XML browsing.
+
+Append operations need special treatment. Multiple `append` operations against the same parent child slot usually coexist because they add sibling XML rather than overwrite a scalar value. A scalar `set` and an `append` that share a parent slot are also not automatically a conflict unless replay or footprint evidence shows the same scalar target, a remove/write overlap, an anchored insert dependency, or another diagnostic condition. The React derived model therefore suppresses plain append coexistence from review.
+
+The review set should still include:
+
+- `remove` operations that mask later operations or overlap with writes.
+- Anchored `insertbefore` / `insertafter` operations, because order and target existence matter.
+- Multiple writes to the same scalar slot.
+- Replay diagnostics such as `order-induced-miss`, `dependency-order-miss`, `broad-match-risk`, `unsupported-operation`, and parse errors.
+
 ## Recommended Theory
 
 Use exact replay as the executable semantics. If a diagnostic depends on whether an XPath matches after earlier patches have run, the authoritative answer should come from replaying operations over the current in-memory XML tree.
 
-Use footprint analysis as abstract interpretation. A `PatchFootprint` should conservatively describe what an operation may read, write, insert, or delete without executing the full patch. The footprint can be broad or uncertain, but it must not pretend to be exact when the XPath or operation is outside the supported subset.
+Use footprint analysis as abstract interpretation. `PatchFootprint` conservatively describes what an operation may read, write, insert, or delete without executing the full patch. The footprint can be broad or uncertain, but it must not pretend to be exact when the XPath or operation is outside the supported subset.
 
 Use provenance as an event ledger plus last-writer state, not as a full historical tree. The useful questions are usually:
 
@@ -93,11 +106,11 @@ This maps naturally to the existing `confidence` field on `PatchTrace`, but the 
 
 ## Adopt
 
-Adopt footprint analysis as the next low-risk layer. It should be static, read-only, and conservative, producing a `PatchFootprint` from `XmlPatchOperation` without changing current CLI or UI contracts at first.
+Adopt footprint analysis as the low-risk fallback layer. It is static, read-only, and conservative, producing a `PatchFootprint` from `XmlPatchOperation` without changing the public context-pack schema.
 
 Adopt lightweight provenance. Extend replay internals around an event ledger and last-writer maps instead of building a full versioned XML tree.
 
-Adopt an operation effect log as the shared substrate between replay, conflict detection, and UI explanation. The existing `PatchTraceEffect` is the starting point.
+Adopt an operation effect log as the shared substrate between replay, conflict detection, and UI explanation. The existing `PatchTraceEffect` is the starting point, and the React viewer already joins conflict groups to trace effects for its evidence pane.
 
 Adopt three-valued diagnostics for new analysis. New checks should explicitly distinguish proven, disproven, and unknown interactions.
 
@@ -109,7 +122,7 @@ Defer pairwise commutativity replay for every operation pair. It is expensive an
 
 Defer fontoxpath validation. The current `xpath` package and simple fast path are sufficient for the present diagnostics; validating a second XPath engine can wait until XPath compatibility becomes a measured problem.
 
-Defer public JSON schema and UI changes until internal traces and conflict grouping have stabilized.
+Defer public JSON schema changes until internal traces and conflict grouping require them. The React UI may continue to adjust its derived display model without changing `ContextPack`.
 
 ## Reject For Now
 
@@ -122,6 +135,8 @@ Reject automatic compatibility patch generation for now. The project should firs
 ## Future Implementation Path
 
 ### Phase 1: Static Footprint Extraction
+
+Status: implemented as an internal extractor in `src/core/footprint.ts`.
 
 Add an internal `PatchFootprint` extractor for `XmlPatchOperation`.
 
@@ -138,6 +153,8 @@ Use this to enrich diagnostics and prefilter potential conflicts, but keep `dete
 
 ### Phase 2: Stable Replay Target Keys
 
+Status: partially implemented through canonical replay targets, replay effects, and lightweight provenance; full stable `NodeId` / `SlotKey` internals remain future work.
+
 Extend replay internals so each selected DOM node receives a stable target key for the life of one replay.
 
 Track:
@@ -151,9 +168,11 @@ The current `PatchTrace` can keep exposing canonical XPath-like strings while in
 
 ### Phase 3: Effect-Based Conflict Detection
 
+Status: partially implemented. `detectConflicts` prefers replay effect overlap, then footprint overlap, then normalized XPath fallback. The React UI consumes `ContextPack.conflicts` as its main conflict source.
+
 Move conflict detection from normalized XPath grouping to footprint/effect overlap.
 
-The first replacement should keep the existing cheap detector as a fallback and add higher-confidence groups when replay effects prove that operations touch the same target or dependent structural slots.
+The first replacement should keep the existing cheap detector as a fallback and add higher-confidence groups when replay effects prove that operations touch the same target or dependent structural slots. Append-only coexistence should remain suppressed in UI review unless another diagnostic makes it reviewable.
 
 ### Phase 4: Logical Tree And Tombstones If Needed
 
@@ -168,7 +187,9 @@ Use this only for concrete needs such as explaining a later miss caused by an ea
 | Patch IR | `XmlPatchOperation` in `src/core/types.ts` | Keep as the scanned operation shape. |
 | Replay trace | `PatchTrace` in `src/core/types.ts` | Current public trace object for context packs and UI. |
 | Replay engine | `buildPatchTrace` in `src/core/patchTrace.ts` | Treat as executable semantics for supported operations. |
-| Cheap conflict detector | `detectConflicts` in `src/core/conflicts.ts` | Same-file normalized XPath grouping; not a full effect model. |
+| Conflict detector | `detectConflicts` in `src/core/conflicts.ts` | Replay effect groups first, footprint fallback second, normalized XPath fallback last. |
+| Footprint extractor | `extractPatchFootprints` in `src/core/footprint.ts` | Static conservative approximation for fallback grouping. |
+| React viewer | `ui/src/model.ts` and `ui/src/main.tsx` | Uses `ContextPack.conflicts` first and joins `ContextPack.trace` for evidence. |
 | Replay modes | `TraceOptions.mode` in `src/core/patchTrace.ts` | `fast` for indexed/simple paths, `exact` for generic XPath replay. |
 | Early provenance state | `previouslyRemoved`, `previousScalarWrites`, `futureAdds` in `src/core/patchTrace.ts` | Evolve into event ledger and last-writer maps. |
 
