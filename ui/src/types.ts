@@ -1,5 +1,5 @@
 export type Risk = "safe" | "info" | "warn" | "danger" | "critical";
-export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ok";
+export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ambiguous-target" | "ok";
 export type ConflictCategory = "value" | "structural" | "mixed";
 export type LayoutMode = "3-column" | "unified" | "timeline";
 export type ViewId = "dashboard" | "load-order" | "xml-browser" | "conflict" | "settings";
@@ -140,15 +140,30 @@ export interface UiAttrHistory {
   disabled?: boolean;
 }
 
+export interface UiConflictEvidence {
+  operationKey: string;
+  status?: PatchTrace["status"];
+  diagnosticKind?: ConflictKind;
+  confidence?: PatchTrace["confidence"];
+  message?: string;
+  effects: PatchTraceEffect[];
+  affectedTargets: PatchTraceTarget[];
+}
+
 export interface UiAttr {
   conflictId: string;
   name: string;
+  target?: string;
   category: ConflictCategory;
   finalKind?: "final" | "candidate" | "status";
   vanilla: string | null;
   history: UiAttrHistory[];
   final: string | null;
   winner?: string;
+  exact?: boolean;
+  sourceLabel?: string;
+  operations?: XmlPatchOperation[];
+  evidence?: UiConflictEvidence[];
   risk: Risk;
   kind: ConflictKind;
   xpath?: string;
@@ -166,6 +181,12 @@ export interface UiConflict {
   id: string;
   file: string;
   node: string;
+  target: string;
+  exact: boolean;
+  winner: string;
+  operations: XmlPatchOperation[];
+  evidence: UiConflictEvidence[];
+  sourceLabel: string;
   category: ConflictCategory;
   finalKind?: "final" | "candidate" | "status";
   kind: ConflictKind;
@@ -191,6 +212,9 @@ export interface UiModel {
     totalPatches: number;
     warnings: number;
     conflicts: number;
+    exactConflictGroups: number;
+    fallbackConflictGroups: number;
+    replayWarnings: number;
     missingXPath: number;
     loadOrderDependent: number;
     safeChanges: number;

@@ -6,7 +6,6 @@ import { scanLatestClientLog } from "./core/logs.js";
 import { defaultMo2Path, defaultProfile } from "./core/paths.js";
 import { scanMo2 } from "./core/scanner.js";
 import { ModRoot } from "./core/types.js";
-import { readContextPack, renderVisualization, writeHtmlReport } from "./core/visualize.js";
 
 const program = new Command();
 
@@ -108,21 +107,6 @@ addMo2Options(program.command("context-pack").description("Build an LLM-friendly
       return;
     }
     printJson(pack);
-  });
-
-program.command("visualize")
-  .description("Render a static HTML conflict dashboard from a context-pack JSON file")
-  .requiredOption("--input <path>", "read context-pack JSON from this path")
-  .option("--out <path>", "write HTML to this path; stdout when omitted")
-  .action(async (options) => {
-    const pack = await readContextPack(options.input);
-    const html = renderVisualization(pack);
-    if (options.out) {
-      await writeHtmlReport(options.out, html);
-      console.log(`Wrote ${options.out}`);
-      return;
-    }
-    console.log(html);
   });
 
 function printJson(value: unknown): void {

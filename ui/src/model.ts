@@ -1,4 +1,4 @@
-import type { ConflictCategory, ConflictKind, ContextPack, PatchTrace, Risk, UiAttr, UiModel, UiNode, UiXmlFile } from "./types";
+import type { ConflictCategory, ConflictKind, ContextPack, PatchTrace, Risk, UiAttr, UiConflictEvidence, UiModel, UiNode, UiXmlFile } from "./types";
 
 export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; desc: string }> = {
   "xpath-miss": { label: "XPath miss", risk: "critical", desc: "The patch XPath matched no current target." },
@@ -9,6 +9,7 @@ export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; de
   "broad-match-risk": { label: "Broad selector", risk: "warn", desc: "The XPath matched multiple targets." },
   "unsupported-operation": { label: "Unsupported op", risk: "info", desc: "The patch is inventoried but not replayed in v0.2." },
   "parse-error": { label: "Parse error", risk: "critical", desc: "The patch or vanilla XML could not be parsed." },
+  "ambiguous-target": { label: "Ambiguous target", risk: "warn", desc: "The patch matched more targets than expected." },
   ok: { label: "Applied", risk: "safe", desc: "The replayed patch has no diagnostic warning." }
 };
 
@@ -60,6 +61,30 @@ samplePack.trace = [
   trace(samplePack.scan.xmlPatches[7], "unsupported", "unsupported-operation", [], [{ kind: "unsupported", target: "/lootcontainers/lootgroup[@name='ammo']", summary: "csv replay is not implemented in v0.2" }])
 ];
 
+samplePack.conflicts = [
+  {
+    file: "items.xml",
+    normalizedXpath: "/items/item[@name='coin']/property[@name='EconomicValue']/@value",
+    operations: [samplePack.scan.xmlPatches[0], samplePack.scan.xmlPatches[1]],
+    winner: samplePack.scan.xmlPatches[1],
+    exact: true
+  },
+  {
+    file: "items.xml",
+    normalizedXpath: "/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value",
+    operations: [samplePack.scan.xmlPatches[2], samplePack.scan.xmlPatches[3]],
+    winner: samplePack.scan.xmlPatches[3],
+    exact: true
+  },
+  {
+    file: "items.xml",
+    normalizedXpath: "/items/item[@name='futureCoin']/@value",
+    operations: [samplePack.scan.xmlPatches[4], samplePack.scan.xmlPatches[5]],
+    winner: samplePack.scan.xmlPatches[5],
+    exact: false
+  }
+];
+
 function op(modName: string, order: number, file: string, xpath: string, operation: string, line: number, valueText?: string, valueKind: "text" | "xml" | "target" | "empty" | "unknown" = valueText == null ? "target" : "text", valueSummary = valueText, attributes?: Record<string, string>) {
   return { modName, displayName: modName, order, file, path: xpath, operation, xpath, line, valueText, valueKind, valueSummary, attributes };
 }
@@ -81,6 +106,8 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
   const patchesByMod = groupBy(pack.scan.xmlPatches, (patch) => patch.modName);
   const patchesByFile = groupBy(pack.scan.xmlPatches, (patch) => patch.file);
   const tracesByFile = groupBy(traces, (item) => item.file);
+  const conflictGroups = pack.conflicts ?? [];
+  const traceIndex = buildTraceIndex(traces);
   const rootsByMod = groupBy(pack.scan.enabledMods, (mod) => mod.mo2Name);
   const seenRoots = new Set<string>();
   const mods = pack.scan.entries
@@ -99,25 +126,33 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
   }
   mods.sort((a, b) => a.sortOrder - b.sortOrder || a.order - b.order || a.folder.localeCompare(b.folder));
 
+  const rows = conflictGroups.length > 0 ? buildConflictGroupRows(conflictGroups, traceIndex) : buildReviewRows(traces);
+  const rowsByFile = groupBy(rows, (row) => row.file);
+
   const xmlFiles: UiXmlFile[] = [...patchesByFile.entries()].map(([file, patches]) => {
     const fileTraces = tracesByFile.get(file) ?? [];
-    const diagnosticCount = fileTraces.filter((item) => item.diagnosticKind !== "ok").length;
+    const fileRows = rowsByFile.get(file) ?? [];
     const missCount = fileTraces.filter((item) => /miss/.test(item.diagnosticKind)).length;
     return {
       path: file,
       patches: patches.length,
       touchingMods: [...new Set(patches.map((patch) => patch.modName))].sort(),
-      conflicts: diagnosticCount,
+      conflicts: fileRows.length || (conflictGroups.length === 0 ? fileTraces.filter((item) => item.diagnosticKind !== "ok").length : 0),
       missing: missCount,
-      risk: riskForDiagnostics(fileTraces)
+      risk: fileRows.length > 0 ? highestRisk(fileRows.map((row) => row.risk)) : riskForDiagnostics(fileTraces)
     };
   }).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || b.conflicts - a.conflicts || b.patches - a.patches || a.path.localeCompare(b.path));
 
-  const rows = buildReviewRows(traces);
   const conflicts = rows.map((row, index) => ({
     id: `c${index + 1}`,
     file: row.file,
     node: row.xpath,
+    target: row.xpath,
+    exact: row.exact ?? true,
+    winner: row.winner ?? "(unknown)",
+    operations: row.operations ?? [],
+    evidence: row.evidence ?? [],
+    sourceLabel: row.sourceLabel ?? "Trace-derived fallback",
     category: row.category,
     finalKind: row.finalKind,
     kind: row.kind,
@@ -142,7 +177,10 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
       xmlFiles: xmlFiles.length,
       totalPatches: pack.scan.xmlPatches.length,
       warnings: pack.scan.warnings.length + pack.logs.warnings.length,
-      conflicts: traces.filter((item) => item.diagnosticKind !== "ok").length,
+      conflicts: rows.length || (conflictGroups.length === 0 ? traces.filter((item) => item.diagnosticKind !== "ok").length : 0),
+      exactConflictGroups: rows.filter((row) => row.exact !== false).length,
+      fallbackConflictGroups: rows.filter((row) => row.exact === false).length,
+      replayWarnings: traces.filter((item) => item.diagnosticKind !== "ok").length,
       missingXPath: traces.filter((item) => /miss/.test(item.diagnosticKind)).length,
       loadOrderDependent: traces.filter((item) => item.diagnosticKind === "order-induced-miss" || item.diagnosticKind === "dependency-order-miss").length,
       safeChanges: traces.filter((item) => item.diagnosticKind === "ok").length
@@ -154,6 +192,10 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
 interface ReviewRow {
   file: string;
   xpath: string;
+  exact?: boolean;
+  sourceLabel?: string;
+  operations?: ContextPack["scan"]["xmlPatches"];
+  evidence?: UiConflictEvidence[];
   category: ConflictCategory;
   kind: ConflictKind;
   risk: Risk;
@@ -163,6 +205,173 @@ interface ReviewRow {
   history: UiAttr["history"];
   winner?: string;
   note: string;
+}
+
+function buildConflictGroupRows(groups: ContextPack["conflicts"], traceIndex: Map<string, PatchTrace>): ReviewRow[] {
+  return groups.flatMap((group) => {
+    if (!isReviewableConflictGroup(group, traceIndex)) return [];
+    const operations = [...group.operations].sort(compareOperation);
+    const evidence = operations.map((operation) => operationEvidence(operation, traceIndex));
+    const traces = evidence.map((item) => item.trace).filter((item): item is PatchTrace => Boolean(item));
+    const category = categoryForGroup(operations, traces);
+    const kind = worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
+    const winner = group.winner;
+    const final = finalValueForOperation(winner, traces.find((trace) => operationKey(trace) === operationKey(winner)));
+    const target = group.normalizedXpath;
+    const risk = riskForConflictGroup(group, traceIndex);
+    const finalKind: ReviewRow["finalKind"] = category === "value" ? "final" : "status";
+    return [{
+      file: group.file,
+      xpath: target,
+      exact: group.exact,
+      sourceLabel: group.exact ? "Replay-proven target" : sourceForFallback(traces),
+      operations,
+      evidence: evidence.map(({ trace: _trace, ...item }) => item),
+      category,
+      kind,
+      risk,
+      final,
+      finalKind,
+      vanilla: firstVanillaValue(traces),
+      history: operations.map((operation) => operationToHistory(operation, traceIndex)),
+      winner: winner.modName,
+      note: explainConflictGroup(group, traces, category)
+    }];
+  }).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
+}
+
+function isReviewableConflictGroup(group: ContextPack["conflicts"][number], traceIndex: Map<string, PatchTrace>): boolean {
+  const operations = group.operations;
+  const traces = operations.map((operation) => traceIndex.get(operationKey(operation))).filter((item): item is PatchTrace => Boolean(item));
+  if (traces.some((trace) => trace.diagnosticKind !== "ok")) return true;
+  if (operations.some((operation) => isRemoveOperation(operation.operation))) return true;
+  if (hasScalarCollision(operations, traces)) return true;
+  if (operations.some((operation) => isAnchoredInsertOperation(operation.operation))) return true;
+  return !operations.every((operation) => isAppendOperation(operation.operation) || isScalarOperation(operation.operation));
+}
+
+function hasScalarCollision(operations: ContextPack["scan"]["xmlPatches"], traces: PatchTrace[]): boolean {
+  const tracedTargets = traces.flatMap((trace) => trace.effects.filter((effect) => isScalarEffect(effect.kind) && effect.kind !== "miss" && effect.kind !== "unsupported").map((effect) => effect.target));
+  if (hasDuplicate(tracedTargets)) return true;
+  const operationTargets = operations.filter((operation) => isScalarOperation(operation.operation)).map((operation) => operation.xpath);
+  return hasDuplicate(operationTargets);
+}
+
+function hasDuplicate(values: string[]): boolean {
+  return new Set(values).size !== values.length;
+}
+
+function isAppendOperation(operation: string): boolean {
+  return operation.toLowerCase() === "append";
+}
+
+function isAnchoredInsertOperation(operation: string): boolean {
+  const lower = operation.toLowerCase();
+  return lower === "insertbefore" || lower === "insertafter";
+}
+
+function isRemoveOperation(operation: string): boolean {
+  return operation.toLowerCase().includes("remove");
+}
+
+function isScalarOperation(operation: string): boolean {
+  const lower = operation.toLowerCase();
+  return lower === "set" || lower === "setattribute" || lower === "removeattribute" || lower === "csv";
+}
+
+function operationEvidence(operation: ContextPack["scan"]["xmlPatches"][number], traceIndex: Map<string, PatchTrace>): UiConflictEvidence & { trace?: PatchTrace } {
+  const key = operationKey(operation);
+  const trace = traceIndex.get(key);
+  return {
+    operationKey: key,
+    status: trace?.status,
+    diagnosticKind: trace?.diagnosticKind,
+    confidence: trace?.confidence,
+    message: trace?.message,
+    effects: trace?.effects ?? [],
+    affectedTargets: trace?.affectedTargets ?? [],
+    trace
+  };
+}
+
+function operationToHistory(operation: ContextPack["scan"]["xmlPatches"][number], traceIndex: Map<string, PatchTrace>): UiAttr["history"][number] {
+  const trace = traceIndex.get(operationKey(operation));
+  if (trace) return traceToHistory(trace);
+  return {
+    mod: operation.modName,
+    order: operation.order,
+    op: operation.operation,
+    value: operation.valueSummary ?? operation.valueText ?? operation.xpath,
+    authored: operation.valueSummary ?? operation.valueText,
+    error: undefined
+  };
+}
+
+function finalValueForOperation(operation: ContextPack["scan"]["xmlPatches"][number], trace: PatchTrace | undefined): string | null {
+  const effect = trace?.effects.find((item) => item.after != null || item.value != null || item.summary != null);
+  return effect?.after ?? effect?.value ?? effect?.summary ?? operation.valueSummary ?? operation.valueText ?? operation.operation ?? null;
+}
+
+function firstVanillaValue(traces: PatchTrace[]): string | null {
+  return traces.flatMap((trace) => trace.effects).find((effect) => effect.before != null)?.before ?? null;
+}
+
+function categoryForGroup(operations: ContextPack["scan"]["xmlPatches"], traces: PatchTrace[]): ConflictCategory {
+  const effects = traces.flatMap((trace) => trace.effects.map((effect) => effect.kind));
+  const opNames = operations.map((operation) => operation.operation.toLowerCase());
+  const hasScalar = effects.some(isScalarEffect) || opNames.some((opName) => /set|attribute|csv/.test(opName));
+  const hasStructural = effects.some(isStructuralEffect) || opNames.some((opName) => /append|insert|remove/.test(opName));
+  if (hasScalar && hasStructural) return "mixed";
+  return hasStructural ? "structural" : "value";
+}
+
+function riskForConflictGroup(group: ContextPack["conflicts"][number], traceIndex: Map<string, PatchTrace>): Risk {
+  const traces = group.operations.map((operation) => traceIndex.get(operationKey(operation))).filter((item): item is PatchTrace => Boolean(item));
+  const traceRisk = riskForDiagnostics(traces);
+  if (traceRisk === "critical") return "critical";
+  if (traces.some((trace) => trace.diagnosticKind === "unsupported-operation") && !group.exact) return "info";
+  if (!group.exact) return "warn";
+  if (traces.some((trace) => trace.effects.some((effect) => effect.kind === "removeNode" || effect.kind === "miss"))) return "critical";
+  const scalarWrites = traces.filter((trace) => trace.effects.some((effect) => isScalarEffect(effect.kind) && effect.kind !== "miss" && effect.kind !== "unsupported"));
+  if (scalarWrites.length > 1) return "danger";
+  const category = categoryForGroup(group.operations, traces);
+  if (category === "structural" || category === "mixed") return "warn";
+  return traceRisk === "safe" ? "danger" : traceRisk;
+}
+
+function sourceForFallback(traces: PatchTrace[]): string {
+  if (traces.some((trace) => trace.status === "missed")) return "Trace miss fallback";
+  if (traces.some((trace) => trace.status === "unsupported")) return "Unsupported replay fallback";
+  if (traces.some((trace) => trace.status === "parseError")) return "Parse-error fallback";
+  return "Footprint / normalized XPath fallback";
+}
+
+function explainConflictGroup(group: ContextPack["conflicts"][number], traces: PatchTrace[], category: ConflictCategory): string {
+  if (group.exact) return `Replay proved these operations touch ${group.normalizedXpath}; load order winner is ${group.winner.modName}.`;
+  if (traces.some((trace) => trace.status === "missed")) return "Replay could not match at least one operation, so this group uses miss evidence plus conservative fallback grouping.";
+  if (traces.some((trace) => trace.status === "unsupported")) return "At least one operation is not replay-supported, so this group is shown from conservative fallback evidence.";
+  if (category === "structural" || category === "mixed") return "Structural footprint overlap was grouped conservatively because replay could not prove a single scalar slot.";
+  return "Normalized XPath / footprint fallback grouped these operations when exact replay evidence was unavailable.";
+}
+
+function operationToPseudoTrace(operation: ContextPack["scan"]["xmlPatches"][number]): PatchTrace {
+  return {
+    id: operationKey(operation),
+    modName: operation.modName,
+    displayName: operation.displayName,
+    order: operation.order,
+    file: operation.file,
+    path: operation.path,
+    line: operation.line,
+    operation: operation.operation,
+    xpath: operation.xpath,
+    status: "applied",
+    matchCountBefore: 0,
+    affectedTargets: [],
+    effects: [],
+    confidence: "low",
+    diagnosticKind: "silent-overwrite"
+  };
 }
 
 function buildReviewRows(traces: PatchTrace[]): ReviewRow[] {
@@ -266,12 +475,17 @@ function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
     const attr: UiAttr = {
       conflictId: `c${index + 1}`,
       name: targetName(row.xpath),
+      target: row.xpath,
       category: row.category,
       finalKind: row.finalKind,
       vanilla: row.vanilla,
       history: row.history,
       final: row.final,
       winner: row.winner,
+      exact: row.exact,
+      sourceLabel: row.sourceLabel,
+      operations: row.operations,
+      evidence: row.evidence,
       risk: row.risk,
       kind: row.kind,
       xpath: row.xpath,
@@ -303,6 +517,10 @@ function riskForDiagnostics(traces: PatchTrace[]): Risk {
   return traces.map((item) => conflictKinds[item.diagnosticKind].risk).sort((a, b) => riskRank(b) - riskRank(a))[0] ?? "safe";
 }
 
+function highestRisk(risks: Risk[]): Risk {
+  return risks.sort((a, b) => riskRank(b) - riskRank(a))[0] ?? "safe";
+}
+
 function riskRank(risk: Risk): number {
   return { safe: 0, info: 1, warn: 2, danger: 3, critical: 4 }[risk];
 }
@@ -313,6 +531,18 @@ function countConflictCategories(categories: ConflictCategory[]): Record<Conflic
 
 function compareTrace(a: PatchTrace, b: PatchTrace): number {
   return a.order - b.order || a.line - b.line || a.modName.localeCompare(b.modName);
+}
+
+function compareOperation(a: ContextPack["scan"]["xmlPatches"][number], b: ContextPack["scan"]["xmlPatches"][number]): number {
+  return a.order - b.order || a.line - b.line || a.modName.localeCompare(b.modName);
+}
+
+function buildTraceIndex(traces: PatchTrace[]): Map<string, PatchTrace> {
+  return new Map(traces.map((trace) => [operationKey(trace), trace]));
+}
+
+function operationKey(operation: Pick<PatchTrace, "file" | "order" | "line" | "operation" | "xpath">): string {
+  return `${operation.file}\0${operation.order}\0${operation.line}\0${operation.operation}\0${operation.xpath}`;
 }
 
 function targetName(xpath: string): string {

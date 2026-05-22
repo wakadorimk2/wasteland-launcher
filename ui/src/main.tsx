@@ -94,7 +94,7 @@ function App() {
         <span className="item"><RiskChip risk="safe" dot /> ready</span>
         <span className="item">{model.source === "context" ? "ContextPack" : "sample"}</span>
         <span className="item">{model.stats.modsEnabled}/{model.stats.modsLoaded} mods</span>
-        <span className="item danger-text">{model.stats.conflicts} diagnostics</span>
+        <span className="item danger-text">{model.stats.conflicts} conflict groups</span>
         <span className="item critical-text">{model.stats.missingXPath} missing</span>
         <span className="spacer" />
         <span className="item">UTF-8</span>
@@ -163,18 +163,18 @@ function Sidebar({ model, view, setView }: { model: UiModel; view: ViewId; setVi
 
 function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; setView: (view: ViewId) => void; setSelectedConflict: (id: string) => void }) {
   const conflictByKind = countBy(model.conflicts.map((conflict) => conflict.kind));
-  const valueReviewConflicts = model.conflicts.filter((conflict) => conflict.category === "value" || conflict.category === "mixed");
+  const topConflicts = [...model.conflicts].sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || b.operations.length - a.operations.length || a.file.localeCompare(b.file));
   return (
     <div>
       <div className="dash-grid">
         <Kpi label="Mods loaded" value={model.stats.modsLoaded} sub={`${model.stats.modsEnabled} enabled`} />
         <Kpi label="XML files touched" value={model.stats.xmlFiles} sub={`${model.stats.totalPatches.toLocaleString()} patches total`} risk="info" />
-        <Kpi label="XPath misses" value={model.stats.missingXPath} sub="not confirmed by replay" risk="critical" />
-        <Kpi label="Diagnostics" value={model.stats.conflicts} sub={`${conflictByKind["silent-overwrite"] ?? 0} silent overwrites`} risk="danger" />
-        <Kpi label="Warnings" value={model.stats.warnings} sub={`load-order dependent: ${model.stats.loadOrderDependent}`} risk="warn" />
-        <Kpi label="Safe changes" value={model.stats.safeChanges} sub="outside detected conflicts" risk="safe" />
+        <Kpi label="Conflict groups" value={model.stats.conflicts} sub={`${conflictByKind["silent-overwrite"] ?? 0} silent overwrites`} risk="danger" />
+        <Kpi label="Exact replay-proven" value={model.stats.exactConflictGroups} sub="concrete replay targets" risk="safe" />
+        <Kpi label="Fallback" value={model.stats.fallbackConflictGroups} sub="footprint or normalized XPath" risk="warn" />
+        <Kpi label="Replay warnings" value={model.stats.replayWarnings} sub={`${model.stats.missingXPath} misses`} risk="critical" />
       </div>
-      <SectionTitle label="Diagnostic summary" />
+      <SectionTitle label="Conflict kind summary" />
       <Panel>
         <Table headers={["", "Conflict kind", "Description", "Count", ""]}>
           {(Object.entries(conflictKinds) as [keyof typeof conflictKinds, (typeof conflictKinds)[keyof typeof conflictKinds]][]).filter(([key]) => key !== "ok").map(([key, kind]) => (
@@ -184,20 +184,20 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
           ))}
         </Table>
       </Panel>
-      <SectionTitle label="Top diagnostics to review" />
+      <SectionTitle label="Top conflict groups to review" />
       <Panel>
-        <Table headers={["", "File", "Node / Attribute", "Kind", "Mods involved", "Final"]}>
-          {valueReviewConflicts.slice(0, 80).map((conflict) => (
+        <Table headers={["", "File", "Target", "Proof", "Winner", "Operations"]}>
+          {topConflicts.slice(0, 80).map((conflict) => (
             <tr key={conflict.id} onClick={() => { setSelectedConflict(conflict.id); setView("conflict"); }}>
               <td><RiskChip risk={conflict.risk} dot /></td>
               <td className="mono accent2">{conflict.file}</td>
-              <td className="mono path-cell">{conflict.node}</td>
-              <td><RiskChip risk={conflictKinds[conflict.kind].risk} label={conflict.category === "mixed" ? "Mixed value" : conflictKinds[conflict.kind].label} /></td>
-              <td><ChipList values={conflict.mods} /></td>
-              <td>{conflict.final ? <span className={`chip ${conflict.finalKind === "candidate" ? "info" : "safe"}`}>{conflict.finalKind === "candidate" ? "CANDIDATE" : "FINAL"} {conflict.final}</span> : <span className="chip critical">none</span>}</td>
+              <td className="mono path-cell">{conflict.target}</td>
+              <td><RiskChip risk={conflict.exact ? "safe" : "warn"} label={conflict.exact ? "exact" : "fallback"} /></td>
+              <td><span className="chip safe">{conflict.winner}</span></td>
+              <td className="mono">{conflict.operations.length}</td>
             </tr>
           ))}
-          {valueReviewConflicts.length === 0 && <tr><td colSpan={6} className="muted">No value diagnostics found. Open Diagnostics / Structural for append, remove, and insert operations.</td></tr>}
+          {topConflicts.length === 0 && <tr><td colSpan={6} className="muted">No conflict groups found in this context pack.</td></tr>}
         </Table>
       </Panel>
       <SectionTitle label="Mods overview" />
@@ -252,7 +252,7 @@ function XmlBrowser({ model, setView, setSelectedFile, highlightMod, setHighligh
     <div>
       <div className="filterbar"><input className="search wide" placeholder="filter file..." value={query} onChange={(event) => setQuery(event.target.value)} /><span className="mono muted">{filtered.length} files</span></div>
       <Panel>
-        <Table headers={["", "XML file", "Patches", "Mods touching", "Diagnostics", "Misses", "Risk"]}>
+        <Table headers={["", "XML file", "Patches", "Mods touching", "Conflicts", "Misses", "Risk"]}>
           {filtered.map((file) => (
             <tr key={file.path} onClick={() => { setSelectedFile(file.path); setView("conflict"); }}>
               <td><RiskChip risk={file.risk} dot /></td><td className="mono accent2">{file.path}</td><td className="num mono">{file.patches}</td><td><ChipList values={file.touchingMods.slice(0, 6)} /></td><td className="num mono danger-text">{file.conflicts}</td><td className="num mono critical-text">{file.missing}</td><td><RiskChip risk={file.risk} /></td>
@@ -355,7 +355,7 @@ function TimelineLayout(props: { flat: FlatItem[]; selected?: FlatItem; setSelec
 
 function TreePane({ flat, selected, setSelected, query = "", setQuery }: { flat: FlatItem[]; selected?: FlatItem; setSelected: (item: FlatItem) => void; query?: string; setQuery?: (value: string) => void }) {
   const filtered = flat.filter((item) => !query || item.label.toLowerCase().includes(query.toLowerCase()));
-  return <div className="cv-pane"><div className="cv-pane-head"><span>XML Tree</span>{setQuery && <input className="mini-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="filter..." />}</div><div className="tree">{filtered.length === 0 ? <div className="empty compact">No conflicts in this tab.</div> : filtered.map((item, index) => <TreeNode key={index} item={item} selected={selected} onSelect={setSelected} />)}</div></div>;
+  return <div className="cv-pane"><div className="cv-pane-head"><span>Conflict Groups</span>{setQuery && <input className="mini-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="filter..." />}</div><div className="tree">{filtered.length === 0 ? <div className="empty compact">No conflicts in this tab.</div> : filtered.map((item, index) => <TreeNode key={index} item={item} selected={selected} onSelect={setSelected} />)}</div></div>;
 }
 
 function TreeNode({ item, selected, onSelect }: { item: FlatItem; selected?: FlatItem; onSelect: (item: FlatItem) => void }) {
@@ -374,9 +374,14 @@ function HistoryPane({ item, highlightMod, setHighlightMod, timeline = false }: 
   const { attr, node, file } = item;
   const structural = attr.category === "structural" || attr.finalKind === "status";
   const finalLabel = attr.finalKind === "candidate" ? "CANDIDATE" : attr.finalKind === "status" ? "STATUS" : "FINAL";
+  const proofLabel = attr.exact === false ? "FALLBACK" : "EXACT";
   return (
     <div className={timeline ? "history-shell timeline-mode" : "history-shell"}>
-      <div className="history-head"><div className="title-row"><RiskChip risk={attr.risk} /><h2>{attr.name}</h2><span className="mono muted">{conflictKinds[attr.kind].label}</span><span className={`chip ${attr.category === "value" ? "info" : attr.category === "mixed" ? "warn" : "critical"}`}>{categoryLabel(attr.category)}</span></div><div className="xpath">{file} :: <span>{node.path}</span> / <b>{attr.name}</b></div></div>
+      <div className="history-head">
+        <div className="title-row"><RiskChip risk={attr.risk} /><h2>{attr.name}</h2><span className="mono muted">{conflictKinds[attr.kind].label}</span><span className={`chip ${attr.exact === false ? "warn" : "safe"}`}>{proofLabel}</span><span className={`chip ${attr.category === "value" ? "info" : attr.category === "mixed" ? "warn" : "critical"}`}>{categoryLabel(attr.category)}</span></div>
+        <div className="xpath">{file} :: <span>{attr.target ?? node.path}</span></div>
+        <div className="detail-strip"><span>{attr.sourceLabel ?? "Trace-derived fallback"}</span><span>winner: {attr.winner ?? "(unknown)"}</span><span>{attr.operations?.length ?? attr.history.length} operations</span></div>
+      </div>
       <div className="timeline">
         <div className="tl-row vanilla"><span className="bullet" /><div className="mod-info"><div className="nm">vanilla</div><div className="author">7 Days to Die / Data/Config</div></div><div className="op-value"><span className="op">base</span><span className="value-cur">{attr.vanilla ?? "(unknown)"}</span></div><span className="verdict">base</span></div>
         {attr.history.map((history, index) => {
@@ -384,7 +389,7 @@ function HistoryPane({ item, highlightMod, setHighlightMod, timeline = false }: 
           return <div key={index} className={["tl-row", isWin ? "win" : "", history.error ? "error" : "", highlightMod === history.mod ? "highlight" : ""].join(" ")} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)}><span className="bullet" /><div className="mod-info"><div className="nm"><span className="order">prio {String(history.order).padStart(2, "0")}</span><span>{history.mod}</span>{isWin && <span className="winner-tag">{finalLabel}</span>}</div><div className="author">{history.authored ? `authored: ${history.authored}` : history.error ?? "diagnostic only"}</div></div><div className="op-value"><span className={`op ${history.op}`}>{history.op}</span><span className="value-cur" title={history.value ?? ""}>{history.value ?? "(unknown)"}</span></div><span className="verdict">{history.error ? "unresolved" : isWin ? attr.finalKind === "candidate" ? "candidate" : "wins" : "shadowed"}</span></div>;
         })}
       </div>
-      <div className="final-card"><div><div className="lab">{structural ? "Structural status" : attr.finalKind === "candidate" ? "Candidate final" : "Final value"}</div><div className="val">{attr.final ?? "(unknown)"}</div><div className="from">{attr.finalKind === "candidate" ? "candidate source" : "winner"}: {attr.winner ?? "(unknown)"}</div></div><RiskChip risk={attr.risk} label={finalLabel.toLowerCase()} /></div>
+      <div className="final-card"><div><div className="lab">{structural ? "Structural status" : attr.finalKind === "candidate" ? "Candidate final" : "Final value"}</div><div className="val">{attr.final ?? "(unknown)"}</div><div className="from">{attr.finalKind === "candidate" ? "candidate source" : "winner"}: {attr.winner ?? "(unknown)"}</div></div><div className="final-chips"><RiskChip risk={attr.exact === false ? "warn" : "safe"} label={proofLabel.toLowerCase()} /><RiskChip risk={attr.risk} label={finalLabel.toLowerCase()} /></div></div>
     </div>
   );
 }
@@ -392,12 +397,20 @@ function HistoryPane({ item, highlightMod, setHighlightMod, timeline = false }: 
 function ExplainPane({ item, setView, highlightMod, setHighlightMod }: { item?: FlatItem; setView: (view: ViewId) => void; highlightMod: string | null; setHighlightMod: (id: string | null) => void }) {
   if (!item || item.kind !== "attr") return <div className="empty"><div className="ico">i</div><div>Details appear here.</div></div>;
   const attr = item.attr;
-  const categoryText = attr.category === "structural"
-    ? "This is a structural XML conflict. Append, remove, and insert operations change the document shape, so an XML fragment is not treated as a final scalar value."
-    : attr.finalKind === "candidate"
-      ? "This row is an individual value candidate. It uses exact xpath, authored value, and load order; unresolved structure nearby is reviewed separately in Structural."
-      : conflictKinds[attr.kind].desc;
-  return <div className="explain"><div><div className="kind-label">{conflictKinds[attr.kind].label} / {categoryLabel(attr.category)}</div><h3>{attr.name}</h3></div><p>{categoryText}</p><div className="rec"><div className="head">Recommended action</div>{attr.note ?? "Read the history from top to bottom. Higher priority rows later in the list can shadow earlier rows."}</div><div className="kind-label">Related mods ({attr.history.length})</div><ul className="mods-involved">{attr.history.map((history) => <li key={history.mod} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)} className={highlightMod === history.mod ? "active" : ""}><span className="order">{history.mod === attr.winner ? "win" : `p${history.order}`}</span><span>{history.mod}</span>{history.mod === attr.winner && <RiskChip risk="safe" dot />}</li>)}</ul><button className="link-button" onClick={() => setView("load-order")}>Open Load Order</button><button className="link-button" onClick={() => setView("xml-browser")}>Open XML Browser</button></div>;
+  const categoryText = attr.exact === false
+    ? fallbackText(attr.sourceLabel)
+    : attr.category === "structural"
+      ? "Replay proved a structural target. Append, remove, and insert operations change the document shape, so the result is shown as a status instead of a scalar value."
+      : "Replay proved the concrete target. The timeline shows each operation in load-order order and marks the current winner.";
+  const evidence = attr.evidence ?? [];
+  return <div className="explain"><div><div className="kind-label">{conflictKinds[attr.kind].label} / {categoryLabel(attr.category)}</div><h3>{attr.name}</h3></div><p>{categoryText}</p><div className="rec"><div className="head">Replay basis</div>{attr.note ?? "Read the history from top to bottom. Higher priority rows later in the list can shadow earlier rows."}</div><div className="evidence-list">{evidence.map((item) => <div className="evidence-block" key={item.operationKey}><div className="mono muted">{item.operationKey.replaceAll("\0", " / ")}</div><div className="evidence-chips"><RiskChip risk={item.diagnosticKind && item.diagnosticKind !== "ok" ? conflictKinds[item.diagnosticKind].risk : "safe"} label={item.status ?? "not traced"} />{item.confidence && <span className="chip info">{item.confidence}</span>}</div><div className="muted">{item.message ?? (item.effects.map((effect) => `${effect.kind}: ${effect.target}`).join(", ") || "No replay effect was attached to this operation.")}</div></div>)}</div><div className="kind-label">Related mods ({attr.history.length})</div><ul className="mods-involved">{attr.history.map((history) => <li key={`${history.mod}-${history.order}-${history.op}`} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)} className={highlightMod === history.mod ? "active" : ""}><span className="order">{history.mod === attr.winner ? "win" : `p${history.order}`}</span><span>{history.mod}</span>{history.mod === attr.winner && <RiskChip risk="safe" dot />}</li>)}</ul><button className="link-button" onClick={() => setView("load-order")}>Open Load Order</button><button className="link-button" onClick={() => setView("xml-browser")}>Open XML Browser</button></div>;
+}
+
+function fallbackText(sourceLabel: string | undefined): string {
+  if (/miss/i.test(sourceLabel ?? "")) return "Replay missed at least one XPath. The group is shown from replay miss evidence plus conservative fallback grouping.";
+  if (/unsupported/i.test(sourceLabel ?? "")) return "At least one operation is not replay-supported, so the group is shown from conservative fallback evidence.";
+  if (/parse/i.test(sourceLabel ?? "")) return "A parse error prevented exact replay proof, so this group falls back to normalized XPath or footprint evidence.";
+  return "Exact replay proof was unavailable. This group uses footprint or normalized XPath fallback evidence.";
 }
 
 function categoryLabel(category: ConflictCategory): string {
@@ -460,6 +473,10 @@ function riskFromConflicts(risks: Risk[]): Risk {
   if (risks.includes("warn")) return "warn";
   if (risks.includes("info")) return "info";
   return "safe";
+}
+
+function riskRank(risk: Risk): number {
+  return { safe: 0, info: 1, warn: 2, danger: 3, critical: 4 }[risk];
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
