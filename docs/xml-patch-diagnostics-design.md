@@ -8,7 +8,7 @@ Accepted as the design direction, with Phase 1 through Phase 3 partially impleme
 
 `wasteland-launcher` inspects 7 Days to Die / MO2 workspaces without writing to MO2, the game install, a dedicated server, or a remote PC. XML patch diagnostics therefore need to explain likely patch interactions from available files while keeping analysis read-only and predictable.
 
-The current implementation already extracts XML patch operations, derives static footprints, replays many operations against vanilla XML, and builds Phase 3 conflict groups for the React UI. The remaining design work is to keep the diagnostic model explicit so future implementation choices converge on the same semantics.
+The current implementation already extracts XML patch operations, derives static footprints, replays many operations against vanilla XML, and builds Phase 3 diagnostic groups for the React UI. The diagnostic model is now intentionally provenance-first: XPath text remains explanation data, while replay effects expose target keys for scalar slots, child slots, and removed nodes.
 
 ## Problem Model
 
@@ -46,9 +46,9 @@ The current IR for scanned patches is `XmlPatchOperation[]` in `src/core/types.t
 
 `PatchTrace` in `src/core/types.ts` is the current exact replay trace shape. `buildPatchTrace` in `src/core/patchTrace.ts` groups operations by XML file, loads the vanilla file from `Data/Config`, evaluates XPath in `fast` or `exact` mode, applies supported operations to an in-memory DOM, and records targets, effects, status, diagnostic kind, and confidence.
 
-`extractPatchFootprints` in `src/core/footprint.ts` is the current Phase 1 static approximation. It extracts read selectors, written scalar slots, removed node selectors, inserted child slots, and a supported / broad / unknown precision marker without changing the public context-pack schema.
+`extractPatchFootprints` in `src/core/footprint.ts` is the current Phase 1 static approximation. It uses the XPath subset compiler in `src/core/xpath.ts`, extracts read selectors, written scalar slots, removed node selectors, inserted child slots, and a supported / broad / unknown precision marker for candidate analysis.
 
-`detectConflicts` in `src/core/conflicts.ts` now combines three sources. It prefers replay effect overlap, uses footprint overlap for fallback candidates, and keeps normalized XPath grouping as the final conservative fallback. `ContextPack.conflicts` is the primary input for the React conflict viewer. `ContextPack.trace` remains the evidence source used to explain replay status, effects, warnings, and confidence.
+`detectConflicts` in `src/core/conflicts.ts` now runs footprint-first candidate analysis, performs targeted replay for candidate operations, then emits schema v3 `ContextPack.diagnosticGroups` with `operationIds` only. `operationsById`, `modsById`, `filesById`, `replayEvidenceByGroupId`, and `coverage` carry the referenced detail. The v2 `conflicts` alias has been removed.
 
 The current replay loop already contains the beginning of a provenance ledger:
 
@@ -62,7 +62,7 @@ The existing `fast` / `exact` trace modes are also a useful architectural entry 
 
 The legacy standalone HTML report path has been retired. The React UI is the formal visualization surface for conflict groups, replay evidence, load order, and XML browsing.
 
-Append operations need special treatment. Multiple `append` operations against the same parent child slot usually coexist because they add sibling XML rather than overwrite a scalar value. A scalar `set` and an `append` that share a parent slot are also not automatically a conflict unless replay or footprint evidence shows the same scalar target, a remove/write overlap, an anchored insert dependency, or another diagnostic condition. The React derived model therefore suppresses plain append coexistence from review.
+Append operations need special treatment. Multiple `append` operations against the same parent child slot do not overwrite a scalar value, but sibling order can still be part of the resulting XML. The diagnostic engine therefore keeps same-parent append and anchored insert overlap as `sibling-order-dependent` structural diagnostics with lower risk than scalar overwrites. A scalar `set` and an `append` that share a parent slot are still not automatically a scalar conflict unless replay or footprint evidence shows the same scalar target, a remove/write overlap, an anchored insert dependency, or another diagnostic condition.
 
 The review set should still include:
 
@@ -86,11 +86,11 @@ Use provenance as an event ledger plus last-writer state, not as a full historic
 
 Represent these as operation effects and keyed ledgers. Avoid storing full tree snapshots unless a specific diagnostic requires them.
 
-Over time, prefer stable target keys over XPath strings as the conflict truth. XPath text is an input expression; it is not a durable identity. Future diagnostics should converge on:
+Prefer stable target keys over XPath strings as the conflict truth. XPath text is an input expression; it is not a durable identity. Diagnostics now expose:
 
-- `NodeId` for concrete replay nodes.
-- `SlotKey` for attribute slots, text slots, and parent/child insertion positions.
-- Operation effect logs for writes, removals, and insertions.
+- `targetKey` for concrete scalar slots, child slots, and replay node removals.
+- `displayTarget` / authored XPath for human explanation.
+- Operation effect logs for writes, removals, insertions, misses, and unsupported operations.
 
 XPath strings can remain part of the user-facing explanation, but they should not be the primary key for conflict detection once better target keys are available.
 
@@ -168,7 +168,7 @@ The current `PatchTrace` can keep exposing canonical XPath-like strings while in
 
 ### Phase 3: Effect-Based Conflict Detection
 
-Status: partially implemented. `detectConflicts` prefers replay effect overlap, then footprint overlap, then normalized XPath fallback. The React UI consumes `ContextPack.conflicts` as its main conflict source.
+Status: v3 implemented. `detectConflicts` builds candidate groups from footprint and normalized XPath evidence, replays candidate operations only, then upgrades groups to exact proof when replay effects share stable target keys. The React UI consumes schema v3 `ContextPack.diagnosticGroups` and hydrates operation detail through `operationsById`.
 
 Move conflict detection from normalized XPath grouping to footprint/effect overlap.
 
@@ -187,9 +187,9 @@ Use this only for concrete needs such as explaining a later miss caused by an ea
 | Patch IR | `XmlPatchOperation` in `src/core/types.ts` | Keep as the scanned operation shape. |
 | Replay trace | `PatchTrace` in `src/core/types.ts` | Current public trace object for context packs and UI. |
 | Replay engine | `buildPatchTrace` in `src/core/patchTrace.ts` | Treat as executable semantics for supported operations. |
-| Conflict detector | `detectConflicts` in `src/core/conflicts.ts` | Replay effect groups first, footprint fallback second, normalized XPath fallback last. |
+| Conflict detector | `detectConflicts` in `src/core/conflicts.ts` | Footprint-first candidate groups, targeted replay upgrades, normalized XPath fallback. |
 | Footprint extractor | `extractPatchFootprints` in `src/core/footprint.ts` | Static conservative approximation for fallback grouping. |
-| React viewer | `ui/src/model.ts` and `ui/src/main.tsx` | Uses `ContextPack.conflicts` first and joins `ContextPack.trace` for evidence. |
+| React viewer | `ui/src/model.ts` and `ui/src/main.tsx` | Uses schema v3 `ContextPack.diagnosticGroups` and `operationsById`, then joins `ContextPack.trace` for evidence. |
 | Replay modes | `TraceOptions.mode` in `src/core/patchTrace.ts` | `fast` for indexed/simple paths, `exact` for generic XPath replay. |
 | Early provenance state | `previouslyRemoved`, `previousScalarWrites`, `futureAdds` in `src/core/patchTrace.ts` | Evolve into event ledger and last-writer maps. |
 

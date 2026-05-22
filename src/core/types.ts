@@ -63,16 +63,99 @@ export interface ScanResult {
   warnings: ScanWarning[];
 }
 
-export interface ConflictGroup {
+export type OperationId = string;
+export type TargetKey = string;
+
+export interface OperationIR extends XmlPatchOperation {
+  opId: OperationId;
+  opcode: string;
+  rawXpath: string;
+  sourceLine: number;
+}
+
+export type DiagnosticConfidence = "proven" | "likely" | "unknown";
+export type DiagnosticClassification =
+  | "silent-overwrite"
+  | "slot-order-dependent"
+  | "structural-mask"
+  | "order-induced-miss"
+  | "dependency-order-miss"
+  | "sibling-order-dependent"
+  | "broad-selector-risk"
+  | "unsupported-operation"
+  | "parse-error"
+  | "unknown-risk";
+
+export interface MatchEvent {
+  opId: OperationId;
+  targetKey?: TargetKey;
+  displayTarget: string;
+  matchKind: "node" | "attribute" | "miss" | "unsupported" | "parseError";
+  cardinality: number;
+  confidence: PatchTrace["confidence"];
+  note?: string;
+}
+
+export interface SlotVersion {
+  slotKey: TargetKey;
+  opId: OperationId;
+  before?: string;
+  after?: string;
+  displayTarget: string;
+}
+
+export interface DiagnosticEvidence {
+  opId: OperationId;
+  effects: PatchTraceEffect[];
+  matchEvents: MatchEvent[];
+  slotVersions: SlotVersion[];
+  note?: string;
+}
+
+export interface DiagnosticGroup {
+  id: string;
   file: string;
+  kind: PatchDiagnosticKind;
+  classification: DiagnosticClassification;
+  risk: "info" | "warn" | "danger" | "critical";
+  confidence: DiagnosticConfidence;
+  proof: "exact" | "footprint" | "fallback" | "partial";
+  targetKey: TargetKey;
+  displayTarget: string;
+  operationIds: OperationId[];
+  primaryOpId: OperationId;
+  relatedOpIds: OperationId[];
+  source: "replay" | "footprint" | "normalized" | "budget";
+  orderDependent: boolean;
   normalizedXpath: string;
-  operations: XmlPatchOperation[];
-  winner: XmlPatchOperation;
-  exact: boolean;
+}
+
+export interface ReplayEvidence {
+  groupId: string;
+  proof: DiagnosticGroup["proof"];
+  evidence: DiagnosticEvidence[];
+  traceIds: OperationId[];
+}
+
+export interface ReplayCoverage {
+  totalOperations: number;
+  candidateOperations: number;
+  replayedOperations: number;
+  partialOperations: number;
+  skippedOperations: number;
+  candidateGroups: number;
+  exactGroups: number;
+  footprintGroups: number;
+  fallbackGroups: number;
+  budgetGroups: number;
+  warnings: ScanWarning[];
 }
 
 export interface ConflictDetectionResult {
-  conflicts: ConflictGroup[];
+  diagnosticGroups: DiagnosticGroup[];
+  operationsById: Record<OperationId, XmlPatchOperation>;
+  replayEvidenceByGroupId: Record<string, ReplayEvidence>;
+  coverage: ReplayCoverage;
   trace: PatchTrace[];
   warnings: ScanWarning[];
 }
@@ -86,10 +169,13 @@ export type PatchDiagnosticKind =
   | "dependency-order-miss"
   | "silent-overwrite"
   | "structural-mask"
+  | "slot-order-dependent"
+  | "sibling-order-dependent"
   | "broad-match-risk"
   | "unsupported-operation"
   | "parse-error"
-  | "ambiguous-target";
+  | "ambiguous-target"
+  | "unknown-risk";
 
 export interface PatchTraceTarget {
   canonical: string;
@@ -101,6 +187,15 @@ export interface PatchTraceTarget {
 export interface PatchTraceEffect {
   kind: "setValue" | "setAttribute" | "removeAttribute" | "appendChild" | "appendAttributeText" | "removeNode" | "insertBefore" | "insertAfter" | "unsupported" | "parseError" | "miss";
   target: string;
+  targetKey?: TargetKey;
+  displayTarget?: string;
+  provenance?: {
+    slotKey?: TargetKey;
+    nodeId?: number;
+    childSlot?: TargetKey;
+    removedByOpId?: OperationId;
+    insertedNodeIds?: number[];
+  };
   before?: string;
   after?: string;
   value?: string;
@@ -139,9 +234,15 @@ export interface LogScanResult {
 }
 
 export interface ContextPack {
+  schemaVersion: 3;
   generatedAt: string;
   scan: ScanResult;
   trace: PatchTrace[];
-  conflicts: ConflictGroup[];
+  diagnosticGroups: DiagnosticGroup[];
+  operationsById: Record<OperationId, XmlPatchOperation>;
+  modsById: Record<string, ModRoot>;
+  filesById: Record<string, { path: string; operationIds: OperationId[]; modIds: string[] }>;
+  replayEvidenceByGroupId: Record<string, ReplayEvidence>;
+  coverage: ReplayCoverage;
   logs: LogScanResult;
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { buildPatchTrace } from "./patchTrace.js";
 import { XmlPatchOperation } from "./types.js";
@@ -18,8 +18,10 @@ test("replay trace normalizes set and setattribute to the same attribute target"
 
     assert.equal(warnings.filter((warning) => warning.kind.includes("miss")).length, 0);
     assert.equal(trace[0].effects[0].target, "/items/item[@name='coin']/property[@name='count']/@value");
+    assert.match(trace[0].effects[0].targetKey ?? "", /^attr:\d+:value$/);
     assert.equal(trace[0].effects[0].after, "120");
     assert.equal(trace[1].effects[0].target, trace[0].effects[0].target);
+    assert.equal(trace[1].effects[0].targetKey, trace[0].effects[0].targetKey);
     assert.equal(trace[1].effects[0].before, "120");
     assert.equal(trace[1].effects[0].after, "160");
     assert.equal(trace[1].diagnosticKind, "silent-overwrite");
@@ -176,6 +178,49 @@ test("append updates fast-path targets for later XPath lookups", async () => {
   }
 });
 
+test("key attribute updates refresh fast-path key lookups", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old" value="1"/></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='old']", "setattribute", "new", "text", "new", { name: "name", value: "new" }),
+      op("B", 2, "items.xml", "/items/item[@name='old']/@value", "set", "stale"),
+      op("C", 3, "items.xml", "/items/item[@name='new']/@value", "set", "2")
+    ], fixture.gamePath, { mode: "fast" });
+
+    assert.equal(trace[0].status, "applied");
+    assert.equal(trace[1].status, "missed");
+    assert.equal(trace[2].status, "applied");
+    assert.equal(trace[2].effects[0].target, "/items/item[@name='new']/@value");
+    assert.equal(trace[2].effects[0].before, "1");
+    assert.equal(trace[2].effects[0].after, "2");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("trace profile records XPath fast path and incremental index updates", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items></items>`);
+  const profilePath = path.join(fixture.gamePath, "profile.json");
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items", "append", `<item name="future" value="1"/>`, "xml", "<item future>"),
+      op("B", 2, "items.xml", "/items/item[@name='future']/@value", "set", "2"),
+      op("C", 3, "items.xml", "/items/item[@name='future']/@value", "set", "3")
+    ], fixture.gamePath, { mode: "fast", traceProfilePath: profilePath });
+
+    const profile = JSON.parse(await readFile(profilePath, "utf8"));
+    assert.equal(trace.length, 3);
+    assert.equal(profile.operations, 3);
+    assert.equal(profile.files[0].file, "items.xml");
+    assert.equal(profile.files[0].xpathFastPath, 3);
+    assert.equal(profile.files[0].xpathFallback, 0);
+    assert.equal(profile.files[0].indexUpdates >= 1, true);
+    assert.equal(profile.files[0].indexRebuilds, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("append refreshes fast-path key index when matching keys already exist", async () => {
   const fixture = await makeGameFixture("items.xml", `<items><group name="old"><item name="future" value="stale"/></group><group name="new"/></items>`);
   try {
@@ -203,8 +248,10 @@ test("remove followed by a later XPath reference becomes order-induced-miss", as
     ], fixture.gamePath);
 
     assert.equal(trace[0].effects[0].kind, "removeNode");
+    assert.match(trace[0].effects[0].targetKey ?? "", /^node:\d+$/);
     assert.equal(trace[1].status, "missed");
     assert.equal(trace[1].diagnosticKind, "order-induced-miss");
+    assert.equal(trace[1].effects[0].provenance?.removedByOpId, "items.xml:1:1:remove:/items/item[@name='old']");
   } finally {
     await fixture.cleanup();
   }
@@ -254,6 +301,24 @@ test("reference to a later appended target becomes dependency-order-miss", async
     assert.equal(trace[0].status, "missed");
     assert.equal(trace[0].diagnosticKind, "dependency-order-miss");
     assert.equal(trace[1].effects[0].kind, "appendChild");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("replay budget is applied per file so one heavy file does not starve another", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" value="1"/></items>`);
+  await writeFile(path.join(fixture.gamePath, "Data", "Config", "blocks.xml"), `<blocks><block name="stone" value="1"/></blocks>`, "utf8");
+  try {
+    const { trace, warnings } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='coin']/@value", "set", "2"),
+      op("B", 2, "blocks.xml", "/blocks/block[@name='stone']/@value", "set", "3")
+    ], fixture.gamePath, { timeoutMs: -1 });
+
+    assert.equal(trace.length, 2);
+    assert.deepEqual(trace.map((item) => item.file).sort(), ["blocks.xml", "items.xml"]);
+    assert.equal(trace.every((item) => item.status === "partial"), true);
+    assert.equal(warnings.filter((warning) => warning.kind === "trace-budget-exceeded").length, 2);
   } finally {
     await fixture.cleanup();
   }

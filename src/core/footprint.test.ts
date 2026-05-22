@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractPatchFootprint, extractPatchFootprints, groupFootprintsByFile } from "./footprint.js";
+import { classifyFootprintPair, extractPatchFootprint, extractPatchFootprints, groupFootprintsByFile } from "./footprint.js";
 import { XmlPatchOperation } from "./types.js";
 
 test("set attribute XPath writes an attribute scalar slot", () => {
@@ -126,11 +126,11 @@ test("empty XPath and parse-error are unknown", () => {
   assert.equal(parseError.reads.length, 0);
 });
 
-test("static but hard-to-identify XPath is broad, not exact supported", () => {
+test("unsupported XPath subset is unknown risk", () => {
   const footprint = extractPatchFootprint(op("set", "/items/item[contains(@name,'coin')]/@value"));
 
-  assert.equal(footprint.precision, "broad");
-  assert.deepEqual(footprint.reasons, ["broad-xpath"]);
+  assert.equal(footprint.precision, "unknown");
+  assert.deepEqual(footprint.reasons, ["unsupported-xpath"]);
   assert.equal(footprint.writtenScalarSlots[0].attribute, "value");
 });
 
@@ -144,6 +144,17 @@ test("groupFootprintsByFile groups footprints by file", () => {
   const grouped = groupFootprintsByFile(footprints);
   assert.equal(grouped.get("items.xml")?.length, 2);
   assert.equal(grouped.get("blocks.xml")?.length, 1);
+});
+
+test("footprint classifier separates commuting, non-commuting, and unknown pairs", () => {
+  const valueA = extractPatchFootprint(op("set", "/items/item[@name='coin']/@value"));
+  const valueB = extractPatchFootprint(op("setattribute", "/items/item[@name='coin']", { name: "value" }));
+  const unrelated = extractPatchFootprint(op("set", "/items/item[@name='rock']/@value"));
+  const unknown = extractPatchFootprint(op("csv", "/items/item[@name='coin']"));
+
+  assert.equal(classifyFootprintPair(valueA, valueB), "non_commutes");
+  assert.equal(classifyFootprintPair(valueA, unrelated), "commutes");
+  assert.equal(classifyFootprintPair(valueA, unknown), "unknown");
 });
 
 function op(operation: string, xpath: string, attributes?: Record<string, string>, file = "items.xml"): XmlPatchOperation {

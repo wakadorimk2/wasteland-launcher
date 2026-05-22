@@ -42,9 +42,9 @@ test("scan resolves direct and nested ModInfo, XML patches, DLLs, and conflicts"
   assert.equal(scan.dlls.length, 1);
   assert.equal(scan.enabledMods[1].displayName, "Bravo");
 
-  const { conflicts } = await detectConflicts(scan.xmlPatches);
-  assert.equal(conflicts.length, 1);
-  assert.equal(conflicts[0].winner.modName, "A");
+  const { diagnosticGroups, operationsById } = await detectConflicts(scan.xmlPatches);
+  assert.equal(diagnosticGroups.length, 1);
+  assert.equal(operationsById[diagnosticGroups[0].primaryOpId].modName, "A");
 });
 
 test("logs picks latest non-empty client log and extracts warnings", async () => {

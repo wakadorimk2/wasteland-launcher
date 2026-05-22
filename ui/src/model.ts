@@ -6,14 +6,18 @@ export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; de
   "dependency-order-miss": { label: "Dependency-order miss", risk: "warn", desc: "A patch appears to reference a target that is added later." },
   "silent-overwrite": { label: "Silent overwrite", risk: "danger", desc: "A later scalar write hides an earlier write on the same canonical target." },
   "structural-mask": { label: "Structural mask", risk: "warn", desc: "A structural operation hides or removes another change." },
+  "slot-order-dependent": { label: "Slot order dependency", risk: "warn", desc: "A scalar slot is changed by non-commuting operations." },
+  "sibling-order-dependent": { label: "Sibling order dependency", risk: "warn", desc: "Structural inserts share a parent or anchor, so sibling order matters." },
   "broad-match-risk": { label: "Broad selector", risk: "warn", desc: "The XPath matched multiple targets." },
   "unsupported-operation": { label: "Unsupported op", risk: "info", desc: "The patch is inventoried but not replayed in v0.2." },
   "parse-error": { label: "Parse error", risk: "critical", desc: "The patch or vanilla XML could not be parsed." },
   "ambiguous-target": { label: "Ambiguous target", risk: "warn", desc: "The patch matched more targets than expected." },
+  "unknown-risk": { label: "Unknown risk", risk: "info", desc: "The engine found conservative evidence but could not prove the target." },
   ok: { label: "Applied", risk: "safe", desc: "The replayed patch has no diagnostic warning." }
 };
 
 const samplePack: ContextPack = {
+  schemaVersion: 3,
   generatedAt: new Date().toISOString(),
   scan: {
     mo2Path: "sample://MO2",
@@ -46,7 +50,12 @@ const samplePack: ContextPack = {
     warnings: []
   },
   trace: [],
-  conflicts: [],
+  diagnosticGroups: [],
+  operationsById: {},
+  modsById: {},
+  filesById: {},
+  replayEvidenceByGroupId: {},
+  coverage: { totalOperations: 0, candidateOperations: 0, replayedOperations: 0, partialOperations: 0, skippedOperations: 0, candidateGroups: 0, exactGroups: 0, footprintGroups: 0, fallbackGroups: 0, budgetGroups: 0, warnings: [] },
   logs: { warnings: [] }
 };
 
@@ -61,29 +70,66 @@ samplePack.trace = [
   trace(samplePack.scan.xmlPatches[7], "unsupported", "unsupported-operation", [], [{ kind: "unsupported", target: "/lootcontainers/lootgroup[@name='ammo']", summary: "csv replay is not implemented in v0.2" }])
 ];
 
-samplePack.conflicts = [
+samplePack.operationsById = Object.fromEntries(samplePack.scan.xmlPatches.map((operation) => [operationKey(operation), operation]));
+samplePack.modsById = Object.fromEntries(samplePack.scan.enabledMods.map((mod) => [mod.mo2Name, mod]));
+samplePack.filesById = {
+  "items.xml": { path: "items.xml", operationIds: samplePack.scan.xmlPatches.filter((operation) => operation.file === "items.xml").map(operationKey), modIds: ["AlphaEconomy", "RemoveBaseItems", "LateDependency", "zzz_MyTweaks"] },
+  "loot.xml": { path: "loot.xml", operationIds: samplePack.scan.xmlPatches.filter((operation) => operation.file === "loot.xml").map(operationKey), modIds: ["AlphaEconomy"] }
+};
+samplePack.diagnosticGroups = [
   {
+    id: "dg1",
     file: "items.xml",
+    kind: "silent-overwrite",
+    classification: "silent-overwrite",
+    risk: "danger",
+    confidence: "proven",
+    proof: "exact",
+    targetKey: "attr:sample:value",
+    displayTarget: "/items/item[@name='coin']/property[@name='EconomicValue']/@value",
+    operationIds: [operationKey(samplePack.scan.xmlPatches[0]), operationKey(samplePack.scan.xmlPatches[1])],
+    primaryOpId: operationKey(samplePack.scan.xmlPatches[1]),
+    relatedOpIds: [operationKey(samplePack.scan.xmlPatches[0])],
+    source: "replay",
+    orderDependent: true,
     normalizedXpath: "/items/item[@name='coin']/property[@name='EconomicValue']/@value",
-    operations: [samplePack.scan.xmlPatches[0], samplePack.scan.xmlPatches[1]],
-    winner: samplePack.scan.xmlPatches[1],
-    exact: true
   },
   {
+    id: "dg2",
     file: "items.xml",
+    kind: "order-induced-miss",
+    classification: "order-induced-miss",
+    risk: "critical",
+    confidence: "proven",
+    proof: "exact",
+    targetKey: "miss:items.xml:/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value",
+    displayTarget: "/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value",
+    operationIds: [operationKey(samplePack.scan.xmlPatches[2]), operationKey(samplePack.scan.xmlPatches[3])],
+    primaryOpId: operationKey(samplePack.scan.xmlPatches[3]),
+    relatedOpIds: [operationKey(samplePack.scan.xmlPatches[2])],
+    source: "replay",
+    orderDependent: true,
     normalizedXpath: "/items/item[@name='oldCoin']/property[@name='EconomicValue']/@value",
-    operations: [samplePack.scan.xmlPatches[2], samplePack.scan.xmlPatches[3]],
-    winner: samplePack.scan.xmlPatches[3],
-    exact: true
   },
   {
+    id: "dg3",
     file: "items.xml",
+    kind: "dependency-order-miss",
+    classification: "dependency-order-miss",
+    risk: "warn",
+    confidence: "likely",
+    proof: "fallback",
+    targetKey: "miss:items.xml:/items/item[@name='futureCoin']/@value",
+    displayTarget: "/items/item[@name='futureCoin']/@value",
+    operationIds: [operationKey(samplePack.scan.xmlPatches[4]), operationKey(samplePack.scan.xmlPatches[5])],
+    primaryOpId: operationKey(samplePack.scan.xmlPatches[5]),
+    relatedOpIds: [operationKey(samplePack.scan.xmlPatches[4])],
+    source: "replay",
+    orderDependent: true,
     normalizedXpath: "/items/item[@name='futureCoin']/@value",
-    operations: [samplePack.scan.xmlPatches[4], samplePack.scan.xmlPatches[5]],
-    winner: samplePack.scan.xmlPatches[5],
-    exact: false
   }
 ];
+samplePack.coverage = { totalOperations: samplePack.scan.xmlPatches.length, candidateOperations: 6, replayedOperations: samplePack.trace.length, partialOperations: 0, skippedOperations: 0, candidateGroups: samplePack.diagnosticGroups.length, exactGroups: 2, footprintGroups: 0, fallbackGroups: 1, budgetGroups: 0, warnings: [] };
 
 function op(modName: string, order: number, file: string, xpath: string, operation: string, line: number, valueText?: string, valueKind: "text" | "xml" | "target" | "empty" | "unknown" = valueText == null ? "target" : "text", valueSummary = valueText, attributes?: Record<string, string>) {
   return { modName, displayName: modName, order, file, path: xpath, operation, xpath, line, valueText, valueKind, valueSummary, attributes };
@@ -106,8 +152,9 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
   const patchesByMod = groupBy(pack.scan.xmlPatches, (patch) => patch.modName);
   const patchesByFile = groupBy(pack.scan.xmlPatches, (patch) => patch.file);
   const tracesByFile = groupBy(traces, (item) => item.file);
-  const conflictGroups = pack.conflicts ?? [];
+  const conflictGroups = pack.diagnosticGroups;
   const traceIndex = buildTraceIndex(traces);
+  const operationsById = pack.operationsById ?? Object.fromEntries(pack.scan.xmlPatches.map((operation) => [operationKey(operation), operation]));
   const rootsByMod = groupBy(pack.scan.enabledMods, (mod) => mod.mo2Name);
   const seenRoots = new Set<string>();
   const mods = pack.scan.entries
@@ -126,7 +173,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
   }
   mods.sort((a, b) => a.sortOrder - b.sortOrder || a.order - b.order || a.folder.localeCompare(b.folder));
 
-  const rows = conflictGroups.length > 0 ? buildConflictGroupRows(conflictGroups, traceIndex) : buildReviewRows(traces);
+  const rows = conflictGroups.length > 0 ? buildConflictGroupRows(conflictGroups, operationsById, traceIndex) : buildReviewRows(traces);
   const rowsByFile = groupBy(rows, (row) => row.file);
 
   const xmlFiles: UiXmlFile[] = [...patchesByFile.entries()].map(([file, patches]) => {
@@ -149,6 +196,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
     node: row.xpath,
     target: row.xpath,
     exact: row.exact ?? true,
+    proof: row.proof,
     winner: row.winner ?? "(unknown)",
     operations: row.operations ?? [],
     evidence: row.evidence ?? [],
@@ -178,8 +226,8 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
       totalPatches: pack.scan.xmlPatches.length,
       warnings: pack.scan.warnings.length + pack.logs.warnings.length,
       conflicts: rows.length || (conflictGroups.length === 0 ? traces.filter((item) => item.diagnosticKind !== "ok").length : 0),
-      exactConflictGroups: rows.filter((row) => row.exact !== false).length,
-      fallbackConflictGroups: rows.filter((row) => row.exact === false).length,
+      exactDiagnosticGroups: rows.filter((row) => row.exact !== false).length,
+      fallbackDiagnosticGroups: rows.filter((row) => row.exact === false).length,
       replayWarnings: traces.filter((item) => item.diagnosticKind !== "ok").length,
       missingXPath: traces.filter((item) => /miss/.test(item.diagnosticKind)).length,
       loadOrderDependent: traces.filter((item) => item.diagnosticKind === "order-induced-miss" || item.diagnosticKind === "dependency-order-miss").length,
@@ -192,7 +240,10 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
 interface ReviewRow {
   file: string;
   xpath: string;
+  searchText?: string;
+  isSummary?: boolean;
   exact?: boolean;
+  proof?: ContextPack["diagnosticGroups"][number]["proof"];
   sourceLabel?: string;
   operations?: ContextPack["scan"]["xmlPatches"];
   evidence?: UiConflictEvidence[];
@@ -207,47 +258,121 @@ interface ReviewRow {
   note: string;
 }
 
-function buildConflictGroupRows(groups: ContextPack["conflicts"], traceIndex: Map<string, PatchTrace>): ReviewRow[] {
-  return groups.flatMap((group) => {
+function buildConflictGroupRows(groups: ContextPack["diagnosticGroups"], operationsById: ContextPack["operationsById"], traceIndex: Map<string, PatchTrace>): ReviewRow[] {
+  const detailRows = groups.flatMap((group) => {
     if (!isReviewableConflictGroup(group, traceIndex)) return [];
-    const operations = [...group.operations].sort(compareOperation);
+    const operations = group.operationIds.map((opId) => operationsById[opId]).filter((operation): operation is ContextPack["scan"]["xmlPatches"][number] => Boolean(operation)).sort(compareOperation);
     const evidence = operations.map((operation) => operationEvidence(operation, traceIndex));
     const traces = evidence.map((item) => item.trace).filter((item): item is PatchTrace => Boolean(item));
+    const historyOperations = operations.filter((operation) => traceIndex.get(operationKey(operation))?.status !== "partial");
     const category = categoryForGroup(operations, traces);
-    const kind = worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
-    const winner = group.winner;
+    const kind = group.kind ?? worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
+    const winner = operationsById[group.primaryOpId] ?? operations[operations.length - 1];
     const final = finalValueForOperation(winner, traces.find((trace) => operationKey(trace) === operationKey(winner)));
-    const target = group.normalizedXpath;
+    const target = group.displayTarget ?? group.normalizedXpath;
     const risk = riskForConflictGroup(group, traceIndex);
     const finalKind: ReviewRow["finalKind"] = category === "value" ? "final" : "status";
     return [{
       file: group.file,
       xpath: target,
-      exact: group.exact,
-      sourceLabel: group.exact ? "Replay-proven target" : sourceForFallback(traces),
+      exact: group.proof === "exact",
+      proof: group.proof,
+      sourceLabel: sourceLabelForProof(group.proof, traces),
       operations,
-      evidence: evidence.map(({ trace: _trace, ...item }) => item),
+      evidence: aggregatePartialEvidence(evidence.map(({ trace: _trace, ...item }) => item)),
       category,
       kind,
       risk,
       final,
       finalKind,
       vanilla: firstVanillaValue(traces),
-      history: operations.map((operation) => operationToHistory(operation, traceIndex)),
+      history: (historyOperations.length > 0 ? historyOperations : operations.filter((operation) => !traceIndex.has(operationKey(operation)))).map((operation) => operationToHistory(operation, traceIndex)),
       winner: winner.modName,
       note: explainConflictGroup(group, traces, category)
     }];
   }).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
+  return [...buildItemSummaryRows(detailRows), ...detailRows];
 }
 
-function isReviewableConflictGroup(group: ContextPack["conflicts"][number], traceIndex: Map<string, PatchTrace>): boolean {
-  const operations = group.operations;
-  const traces = operations.map((operation) => traceIndex.get(operationKey(operation))).filter((item): item is PatchTrace => Boolean(item));
-  if (traces.some((trace) => trace.diagnosticKind !== "ok")) return true;
-  if (operations.some((operation) => isRemoveOperation(operation.operation))) return true;
-  if (hasScalarCollision(operations, traces)) return true;
-  if (operations.some((operation) => isAnchoredInsertOperation(operation.operation))) return true;
-  return !operations.every((operation) => isAppendOperation(operation.operation) || isScalarOperation(operation.operation));
+function buildItemSummaryRows(rows: ReviewRow[]): ReviewRow[] {
+  const candidates = rows.filter((row) => row.file === "items.xml").map((row) => {
+    const itemName = itemNameForTarget(row.xpath);
+    if (!itemName) return undefined;
+    return { row, itemName, itemCategory: itemCategoryForName(itemName), changeKind: changeKindForTarget(row.xpath) };
+  }).filter((item): item is { row: ReviewRow; itemName: string; itemCategory: string; changeKind: string } => Boolean(item));
+  const summaries: ReviewRow[] = [];
+  for (const [key, entries] of groupBy(candidates, (item) => `${item.row.file}\0${item.itemCategory}\0${item.changeKind}`).entries()) {
+    if (entries.length < 2) continue;
+    const [file, itemCategory, changeKind] = key.split("\0");
+    const memberRows = entries.map((entry) => entry.row);
+    const operations = memberRows.flatMap((row) => row.operations ?? []);
+    const risk = highestRisk(memberRows.map((row) => row.risk));
+    const category = summarizeCategory(memberRows.map((row) => row.category));
+    const kind = highestRiskKind(memberRows.map((row) => row.kind));
+    const modCounts = countByValues(operations.map((operation) => operation.modName));
+    const targetCounts = countByValues(entries.map((entry) => entry.itemName));
+    const topMods = topCounts(modCounts, 5);
+    const topTargets = topCounts(targetCounts, 8);
+    const groupCount = memberRows.length;
+    const operationCount = operations.length;
+    summaries.push({
+      file,
+      xpath: `${itemCategory} / ${changeKind}`,
+      searchText: [itemCategory, changeKind, ...memberRows.map((row) => row.xpath), ...topMods.map((item) => item.name), ...topTargets.map((item) => item.name)].join(" "),
+      isSummary: true,
+      exact: memberRows.every((row) => row.exact !== false),
+      proof: memberRows.some((row) => row.proof === "partial") ? "partial" : memberRows.every((row) => row.proof === "exact") ? "exact" : "fallback",
+      sourceLabel: "UI summary from diagnostic groups",
+      operations,
+      evidence: [{
+        operationKey: `summary\0${file}\0${itemCategory}\0${changeKind}`,
+        status: undefined,
+        diagnosticKind: kind,
+        confidence: "low",
+        message: `${groupCount} groups / ${operationCount} operations. Top mods: ${formatCounts(topMods)}. Top targets: ${formatCounts(topTargets)}.`,
+        effects: [],
+        affectedTargets: []
+      }],
+      category,
+      kind,
+      risk,
+      final: `${groupCount} groups / ${operationCount} operations`,
+      finalKind: "status",
+      vanilla: null,
+      history: topMods.map((item, index) => ({
+        mod: item.name,
+        order: index + 1,
+        op: "summary",
+        value: `${item.count} operations`,
+        authored: `${groupCount} groups total`
+      })),
+      winner: topMods[0]?.name,
+      note: `Summary only. Individual diagnostic groups remain below. Top targets: ${formatCounts(topTargets)}.`
+    });
+  }
+  return summaries.sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
+}
+
+function aggregatePartialEvidence(evidence: UiConflictEvidence[]): UiConflictEvidence[] {
+  const partial = evidence.filter((item) => item.status === "partial");
+  if (partial.length === 0) return evidence;
+  return [
+    ...evidence.filter((item) => item.status !== "partial"),
+    {
+      operationKey: `budget-partial\0${partial.length}`,
+      status: "partial",
+      diagnosticKind: "unsupported-operation",
+      confidence: "low",
+      message: `Budget partial: ${partial.length} operations`,
+      effects: [],
+      affectedTargets: []
+    }
+  ];
+}
+
+function isReviewableConflictGroup(group: ContextPack["diagnosticGroups"][number], _traceIndex: Map<string, PatchTrace>): boolean {
+  if (group.kind !== "ok") return true;
+  return group.risk !== "info";
 }
 
 function hasScalarCollision(operations: ContextPack["scan"]["xmlPatches"], traces: PatchTrace[]): boolean {
@@ -325,18 +450,26 @@ function categoryForGroup(operations: ContextPack["scan"]["xmlPatches"], traces:
   return hasStructural ? "structural" : "value";
 }
 
-function riskForConflictGroup(group: ContextPack["conflicts"][number], traceIndex: Map<string, PatchTrace>): Risk {
-  const traces = group.operations.map((operation) => traceIndex.get(operationKey(operation))).filter((item): item is PatchTrace => Boolean(item));
+function riskForConflictGroup(group: ContextPack["diagnosticGroups"][number], traceIndex: Map<string, PatchTrace>): Risk {
+  if (group.risk) return group.risk;
+  const traces = group.operationIds.map((opId) => traceIndex.get(opId)).filter((item): item is PatchTrace => Boolean(item));
   const traceRisk = riskForDiagnostics(traces);
   if (traceRisk === "critical") return "critical";
-  if (traces.some((trace) => trace.diagnosticKind === "unsupported-operation") && !group.exact) return "info";
-  if (!group.exact) return "warn";
+  if (traces.some((trace) => trace.diagnosticKind === "unsupported-operation") && group.proof !== "exact") return "info";
+  if (group.proof !== "exact") return "warn";
   if (traces.some((trace) => trace.effects.some((effect) => effect.kind === "removeNode" || effect.kind === "miss"))) return "critical";
   const scalarWrites = traces.filter((trace) => trace.effects.some((effect) => isScalarEffect(effect.kind) && effect.kind !== "miss" && effect.kind !== "unsupported"));
   if (scalarWrites.length > 1) return "danger";
-  const category = categoryForGroup(group.operations, traces);
-  if (category === "structural" || category === "mixed") return "warn";
+  const category = traces.some((trace) => trace.effects.some((effect) => isStructuralEffect(effect.kind))) ? "structural" : "value";
+  if (category === "structural") return "warn";
   return traceRisk === "safe" ? "danger" : traceRisk;
+}
+
+function sourceLabelForProof(proof: ContextPack["diagnosticGroups"][number]["proof"], traces: PatchTrace[]): string {
+  if (proof === "exact") return "Targeted exact replay";
+  if (proof === "footprint") return "Footprint candidate analysis";
+  if (proof === "partial") return "Budget-limited partial evidence";
+  return sourceForFallback(traces);
 }
 
 function sourceForFallback(traces: PatchTrace[]): string {
@@ -346,8 +479,9 @@ function sourceForFallback(traces: PatchTrace[]): string {
   return "Footprint / normalized XPath fallback";
 }
 
-function explainConflictGroup(group: ContextPack["conflicts"][number], traces: PatchTrace[], category: ConflictCategory): string {
-  if (group.exact) return `Replay proved these operations touch ${group.normalizedXpath}; load order winner is ${group.winner.modName}.`;
+function explainConflictGroup(group: ContextPack["diagnosticGroups"][number], traces: PatchTrace[], category: ConflictCategory): string {
+  if (group.classification) return `${group.classification}; confidence ${group.confidence ?? "unknown"}; proof ${group.proof}; target ${group.displayTarget ?? group.normalizedXpath}.`;
+  if (group.proof === "exact") return `Targeted replay proved these operations touch ${group.normalizedXpath}.`;
   if (traces.some((trace) => trace.status === "missed")) return "Replay could not match at least one operation, so this group uses miss evidence plus conservative fallback grouping.";
   if (traces.some((trace) => trace.status === "unsupported")) return "At least one operation is not replay-supported, so this group is shown from conservative fallback evidence.";
   if (category === "structural" || category === "mixed") return "Structural footprint overlap was grouped conservatively because replay could not prove a single scalar slot.";
@@ -471,11 +605,12 @@ function explainTraceGroup(items: PatchTrace[]): string {
 
 function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
   const byFile = new Map<string, UiNode[]>();
-  rows.slice(0, 160).forEach((row, index) => {
+  rows.forEach((row, index) => {
     const attr: UiAttr = {
       conflictId: `c${index + 1}`,
-      name: targetName(row.xpath),
+      name: row.isSummary ? row.xpath : targetName(row.xpath),
       target: row.xpath,
+      searchText: row.searchText,
       category: row.category,
       finalKind: row.finalKind,
       vanilla: row.vanilla,
@@ -491,8 +626,8 @@ function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
       xpath: row.xpath,
       note: row.note
     };
-    const nodePath = parentPath(row.xpath);
-    const node = { path: nodePath, label: `<${nodePath || row.xpath}>`, risk: attr.risk, attrs: [attr] };
+    const nodePath = row.isSummary ? `Summary / ${row.file}` : parentPath(row.xpath);
+    const node = { path: nodePath, label: row.isSummary ? "Summaries" : `<${nodePath || row.xpath}>`, risk: attr.risk, attrs: [attr] };
     const list = byFile.get(row.file) ?? [];
     list.push(node);
     byFile.set(row.file, list);
@@ -519,6 +654,17 @@ function riskForDiagnostics(traces: PatchTrace[]): Risk {
 
 function highestRisk(risks: Risk[]): Risk {
   return risks.sort((a, b) => riskRank(b) - riskRank(a))[0] ?? "safe";
+}
+
+function highestRiskKind(kinds: ConflictKind[]): ConflictKind {
+  return kinds.sort((a, b) => riskRank(conflictKinds[b].risk) - riskRank(conflictKinds[a].risk))[0] ?? "unknown-risk";
+}
+
+function summarizeCategory(categories: ConflictCategory[]): ConflictCategory {
+  const unique = new Set(categories);
+  if (unique.has("mixed") || (unique.has("value") && unique.has("structural"))) return "mixed";
+  if (unique.has("structural")) return "structural";
+  return "value";
 }
 
 function riskRank(risk: Risk): number {
@@ -552,6 +698,48 @@ function targetName(xpath: string): string {
 function parentPath(xpath: string): string {
   const parts = xpath.split("/").filter(Boolean);
   return parts.slice(Math.max(0, parts.length - 2)).join("/") || xpath;
+}
+
+function itemNameForTarget(target: string): string | undefined {
+  return target.match(/\/items\/item\[@name=['"]([^'"]+)['"]\]/)?.[1];
+}
+
+function itemCategoryForName(name: string): string {
+  if (/^ammo(?:Eft)?/i.test(name)) return "Ammo";
+  if (/^gunbow/i.test(name)) return "Bow";
+  if (/^gun/i.test(name)) return "Gun";
+  if (/^(?:armor|modArmor)/i.test(name)) return "Armor";
+  if (/^(?:melee|tool)/i.test(name)) return "Tool/Melee";
+  return "Item";
+}
+
+function changeKindForTarget(target: string): string {
+  const passive = target.match(/\/passive_effect\[@name=['"]([^'"]+)['"]\]/);
+  if (passive) return `Passive effect: ${passive[1]}`;
+  if (/\/property\[@name=['"]EconomicValue['"]\]\/@value$/.test(target)) return "EconomicValue";
+  if (/\/effect_group(?:\/|$)/.test(target)) return "Effect group";
+  const attr = target.match(/\/@([\w.-]+)$/);
+  if (attr) return attr[1];
+  const named = target.match(/\/([\w.-]+)\[@name=['"]([^'"]+)['"]\](?:$|\/)/);
+  if (named) return `${named[1]}: ${named[2]}`;
+  return targetName(target).replace(/\[[^\]]+\]/g, "");
+}
+
+function countByValues(values: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return counts;
+}
+
+function topCounts(counts: Map<string, number>, limit: number): { name: string; count: number }[] {
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+function formatCounts(items: { name: string; count: number }[]): string {
+  return items.length > 0 ? items.map((item) => `${item.name} (${item.count})`).join(", ") : "none";
 }
 
 function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {

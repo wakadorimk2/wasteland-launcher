@@ -29,12 +29,12 @@ Generate `ui/public/context.json` first, then start the Vite UI. The app auto-lo
 
 The Dashboard summarizes the current pack:
 
-- `Conflict groups`: reviewable groups derived from `ContextPack.conflicts`, after the React derived model suppresses low-value coexistence cases.
+- `Candidate groups`: reviewable groups derived from schema v3 `ContextPack.diagnosticGroups`.
 - `Exact replay-proven`: groups where replay effects proved a concrete shared target.
-- `Fallback`: conservative groups from footprint or normalized XPath evidence when exact replay evidence was unavailable.
-- `Replay warnings`: non-ok trace diagnostics such as misses, unsupported operations, parse errors, broad matches, or budget-limited traces.
+- `Unknown risk`: conservative groups from footprint or normalized XPath evidence when exact replay evidence was unavailable.
+- `Coverage`: non-ok trace diagnostics such as misses, unsupported operations, parse errors, broad matches, or budget-limited traces.
 
-The Diagnostics view is the main Phase 3 conflict viewer. It reads `ContextPack.conflicts` first, joins each operation to replay evidence from `ContextPack.trace`, and shows the winner, operation timeline, and evidence pane. Plain `append` changes against the same parent slot usually coexist in 7 Days to Die XML patches, so append-only additions are suppressed from review unless replay diagnostics, remove operations, anchored inserts, or scalar target collisions make the group worth inspecting.
+The Diagnostics view is the schema v3 candidate viewer. It reads only `ContextPack.diagnosticGroups`, hydrates operation references through `ContextPack.operationsById`, joins targeted replay evidence from `ContextPack.trace`, and shows target keys, classification, confidence, operation timeline, and evidence pane. XML identity is no longer based on normalized XPath alone: replay effects carry `targetKey` values such as scalar slots, child slots, and removed node keys. Same-parent `append` and anchored insert operations are retained as order-dependent structural diagnostics because sibling order can be part of the final XML result.
 
 For cache-busting or a production-build check, you can preview a built UI on an alternate local port:
 
@@ -48,8 +48,8 @@ npm run ui:preview -- --host 127.0.0.1 --port 5182 --strictPort
 - Resolves both direct `ModInfo.xml` roots and nested child mod roots.
 - Indexes `Config/*.xml` patch operations and their xpath/path attributes.
 - Records DLL filename, size, modified time, and SHA-256 hash.
-- Reports XML patch conflicts from replayed effects, with conservative XPath fallback when vanilla XML cannot be replayed.
+- Reports XML patch diagnostics from replayed provenance effects, with conservative XPath fallback when vanilla XML cannot be replayed.
 - Reads the latest non-empty client log from `%APPDATA%\7DaysToDie\logs`.
-- Shows Phase 3 conflict groups in the React UI from `ContextPack.conflicts`, enriched with `ContextPack.trace` replay evidence.
+- Shows Phase 3 diagnostic groups in the React UI from `ContextPack.diagnosticGroups`, enriched with `ContextPack.trace` replay evidence and provenance target keys.
 
 The MVP does not write to MO2, the game install, a dedicated server, or a remote notebook server. The only write path is `context-pack --out`.

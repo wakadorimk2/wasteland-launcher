@@ -4,6 +4,7 @@ import { buildContextPack, writeContextPack } from "./core/context.js";
 import { detectConflicts } from "./core/conflicts.js";
 import { scanLatestClientLog } from "./core/logs.js";
 import { defaultMo2Path, defaultProfile } from "./core/paths.js";
+import { PatchTraceProgress } from "./core/patchTrace.js";
 import { scanMo2 } from "./core/scanner.js";
 import { ModRoot } from "./core/types.js";
 
@@ -39,19 +40,24 @@ addMo2Options(program.command("conflicts").description("Report XML patch conflic
   .option("--game <path>", "7 Days to Die install path for vanilla Data/Config resolution")
   .option("--resolve-mode <mode>", "conflict resolution mode: fast or exact", "fast")
   .option("--resolve-timeout-ms <ms>", "best-effort conflict resolution budget in milliseconds", "8000")
+  .option("--trace-profile <path>", "write replay performance profile JSON to this path")
+  .option("--no-progress", "disable terminal progress output")
   .action(async (options) => {
     const scan = await scanMo2(options.mo2, options.profile);
     const mode = options.resolveMode === "exact" ? "exact" : "fast";
     const timeoutMs = Number.parseInt(options.resolveTimeoutMs, 10);
-    const detection = await detectConflicts(scan.xmlPatches, options.game, {
-      mode,
-      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000
-    });
+    const progress = createProgressReporter(options.progress !== false && !wantsJson(options));
+    const detection = await withProgress(progress, () => detectConflicts(scan.xmlPatches, options.game, {
+        mode,
+        timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000,
+        traceProfilePath: options.traceProfile,
+        onProgress: progress.onProgress
+      }));
     if (wantsJson(options)) {
-      printJson(detection.conflicts);
+      printJson(detection.diagnosticGroups);
       return;
     }
-    printConflicts(detection.conflicts);
+    printConflicts(detection.diagnosticGroups, detection.operationsById);
   });
 
 addMo2Options(program.command("logs")
@@ -93,14 +99,19 @@ addMo2Options(program.command("context-pack").description("Build an LLM-friendly
   .option("--resolve-mode <mode>", "conflict resolution mode: fast or exact", "fast")
   .option("--resolve-timeout-ms <ms>", "best-effort conflict resolution budget in milliseconds", "8000")
   .option("--trace-resolve <path>", "write conflict resolution trace JSONL to this path")
+  .option("--trace-profile <path>", "write replay performance profile JSON to this path")
+  .option("--no-progress", "disable terminal progress output")
   .action(async (options) => {
     const mode = options.resolveMode === "exact" ? "exact" : "fast";
     const timeoutMs = Number.parseInt(options.resolveTimeoutMs, 10);
-    const pack = await buildContextPack(options.mo2, options.profile, options.game, {
-      mode,
-      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000,
-      tracePath: options.traceResolve
-    });
+    const progress = createProgressReporter(options.progress !== false && Boolean(options.out));
+    const pack = await withProgress(progress, () => buildContextPack(options.mo2, options.profile, options.game, {
+        mode,
+        timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000,
+        tracePath: options.traceResolve,
+        traceProfilePath: options.traceProfile,
+        onProgress: progress.onProgress
+      }));
     if (options.out) {
       await writeContextPack(options.out, pack);
       console.log(`Wrote ${options.out}`);
@@ -111,6 +122,68 @@ addMo2Options(program.command("context-pack").description("Build an LLM-friendly
 
 function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function withProgress<T>(progress: { finish: () => void }, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } finally {
+    progress.finish();
+  }
+}
+
+function createProgressReporter(enabled: boolean): { onProgress?: (progress: PatchTraceProgress) => void; finish: () => void } {
+  if (!enabled || !process.stderr.isTTY) return { finish: () => undefined };
+  const width = 28;
+  let lastRenderAt = 0;
+  let lastLineLength = 0;
+  let active = false;
+
+  const render = (progress: PatchTraceProgress, force = false): void => {
+    const now = Date.now();
+    if (!force && progress.phase === "operation" && now - lastRenderAt < 100) return;
+    lastRenderAt = now;
+    active = true;
+
+    const total = Math.max(progress.totalOperations, 1);
+    const processed = Math.min(progress.processedOperations, total);
+    const ratio = processed / total;
+    const filled = Math.min(width, Math.floor(ratio * width));
+    const bar = `${"#".repeat(filled)}${"-".repeat(width - filled)}`;
+    const percent = String(Math.floor(ratio * 100)).padStart(3, " ");
+    const filePart = progress.file && progress.fileIndex && progress.fileCount
+      ? ` file ${progress.fileIndex}/${progress.fileCount} ${progress.file}`
+      : "";
+    const fileOps = progress.fileOperations != null && progress.fileProcessed != null
+      ? ` (${progress.fileProcessed}/${progress.fileOperations})`
+      : "";
+    const elapsed = formatDuration(progress.elapsedMs);
+    const message = progress.message ? ` - ${progress.message}` : "";
+    const line = `[${bar}] ${percent}% ${processed}/${progress.totalOperations}${filePart}${fileOps} elapsed ${elapsed}${message}`;
+    const padding = " ".repeat(Math.max(0, lastLineLength - line.length));
+    process.stderr.write(`\r${line}${padding}`);
+    lastLineLength = line.length;
+    if (progress.phase === "done") {
+      process.stderr.write("\n");
+      active = false;
+    }
+  };
+
+  return {
+    onProgress: (progress) => render(progress, progress.phase !== "operation"),
+    finish: () => {
+      if (active) process.stderr.write("\n");
+      active = false;
+    }
+  };
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes === 0) return `${rest}s`;
+  return `${minutes}m ${String(rest).padStart(2, "0")}s`;
 }
 
 function printScan(scan: Awaited<ReturnType<typeof scanMo2>>): void {
@@ -132,14 +205,21 @@ function printScan(scan: Awaited<ReturnType<typeof scanMo2>>): void {
   })));
 }
 
-function printConflicts(conflicts: Awaited<ReturnType<typeof detectConflicts>>["conflicts"]): void {
-  console.log(`Conflict groups: ${conflicts.length}`);
-  console.table(conflicts.slice(0, 120).map((group) => ({
+function printConflicts(
+  diagnosticGroups: Awaited<ReturnType<typeof detectConflicts>>["diagnosticGroups"],
+  operationsById: Awaited<ReturnType<typeof detectConflicts>>["operationsById"]
+): void {
+  console.log(`Diagnostic groups: ${diagnosticGroups.length}`);
+  console.table(diagnosticGroups.slice(0, 120).map((group) => ({
     file: group.file,
-    xpath: group.normalizedXpath,
-    mods: [...new Set(group.operations.map((operation) => operation.modName))].join(" -> "),
-    winner: group.winner.modName,
-    exact: group.exact
+    target: group.displayTarget,
+    classification: group.classification,
+    confidence: group.confidence,
+    proof: group.proof,
+    risk: group.risk,
+    mods: [...new Set(group.operationIds.map((opId) => operationsById[opId]?.modName ?? opId))].join(" -> "),
+    primary: operationsById[group.primaryOpId]?.modName ?? group.primaryOpId,
+    source: group.source
   })));
 }
 

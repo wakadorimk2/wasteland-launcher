@@ -52,7 +52,7 @@ function App() {
     <div className="app">
       <div className="titlebar">
         <div className="dots"><span className="dot r" /><span className="dot y" /><span className="dot g" /></div>
-        <span className="title-text">7DTD Mod Conflict Analyzer</span>
+        <span className="title-text">7DTD Mod Diagnostic Analyzer v3</span>
         <span className="meta">{model.profile} - {model.mods.length} loaded</span>
       </div>
 
@@ -70,7 +70,8 @@ function App() {
           <button className="btn primary" type="button" disabled title="Disabled: diagnostic UI only">Apply zzz_ patch</button>
         </div>
         {loadError && <div className="notice danger">{loadError}</div>}
-        {model.source === "sample" && <div className="notice">No ui/public/context.json found. Showing bundled sample diagnostics.</div>}
+        <div className="notice">{model.source === "context" ? "Loaded context.json schema v3." : "Bundled v3 sample data is active."}</div>
+        {model.source === "sample" && <div className="notice">No schema v3 ui/public/context.json found. Showing bundled sample diagnostics.</div>}
         <div className="main-content">
           {view === "dashboard" && <Dashboard model={model} setView={setView} setSelectedConflict={setSelectedConflict} />}
           {view === "load-order" && <LoadOrderView model={model} highlightMod={highlightMod} setHighlightMod={setHighlightMod} />}
@@ -94,7 +95,7 @@ function App() {
         <span className="item"><RiskChip risk="safe" dot /> ready</span>
         <span className="item">{model.source === "context" ? "ContextPack" : "sample"}</span>
         <span className="item">{model.stats.modsEnabled}/{model.stats.modsLoaded} mods</span>
-        <span className="item danger-text">{model.stats.conflicts} conflict groups</span>
+        <span className="item danger-text">{model.stats.conflicts} candidate groups</span>
         <span className="item critical-text">{model.stats.missingXPath} missing</span>
         <span className="spacer" />
         <span className="item">UTF-8</span>
@@ -169,14 +170,14 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
       <div className="dash-grid">
         <Kpi label="Mods loaded" value={model.stats.modsLoaded} sub={`${model.stats.modsEnabled} enabled`} />
         <Kpi label="XML files touched" value={model.stats.xmlFiles} sub={`${model.stats.totalPatches.toLocaleString()} patches total`} risk="info" />
-        <Kpi label="Conflict groups" value={model.stats.conflicts} sub={`${conflictByKind["silent-overwrite"] ?? 0} silent overwrites`} risk="danger" />
-        <Kpi label="Exact replay-proven" value={model.stats.exactConflictGroups} sub="concrete replay targets" risk="safe" />
-        <Kpi label="Fallback" value={model.stats.fallbackConflictGroups} sub="footprint or normalized XPath" risk="warn" />
-        <Kpi label="Replay warnings" value={model.stats.replayWarnings} sub={`${model.stats.missingXPath} misses`} risk="critical" />
+        <Kpi label="Candidate groups" value={model.stats.conflicts} sub={`${conflictByKind["silent-overwrite"] ?? 0} silent overwrites`} risk="danger" />
+        <Kpi label="Exact replay-proven" value={model.stats.exactDiagnosticGroups} sub="concrete replay targets" risk="safe" />
+        <Kpi label="Unknown risk" value={conflictByKind["unknown-risk"] ?? 0} sub="unsupported or conservative" risk="info" />
+        <Kpi label="Coverage" value={model.stats.replayWarnings} sub={`${model.stats.missingXPath} misses / partials`} risk="critical" />
       </div>
-      <SectionTitle label="Conflict kind summary" />
+      <SectionTitle label="Diagnostic kind summary" />
       <Panel>
-        <Table headers={["", "Conflict kind", "Description", "Count", ""]}>
+        <Table headers={["", "Diagnostic kind", "Description", "Count", ""]}>
           {(Object.entries(conflictKinds) as [keyof typeof conflictKinds, (typeof conflictKinds)[keyof typeof conflictKinds]][]).filter(([key]) => key !== "ok").map(([key, kind]) => (
             <tr key={key} onClick={() => setView("conflict")}>
               <td><RiskChip risk={kind.risk} dot /></td><td className="mono">{kind.label}</td><td className="muted">{kind.desc}</td><td className="num mono">{conflictByKind[key] ?? 0}</td><td className="mono muted">open</td>
@@ -184,7 +185,7 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
           ))}
         </Table>
       </Panel>
-      <SectionTitle label="Top conflict groups to review" />
+      <SectionTitle label="Top candidate groups to review" />
       <Panel>
         <Table headers={["", "File", "Target", "Proof", "Winner", "Operations"]}>
           {topConflicts.slice(0, 80).map((conflict) => (
@@ -192,12 +193,12 @@ function Dashboard({ model, setView, setSelectedConflict }: { model: UiModel; se
               <td><RiskChip risk={conflict.risk} dot /></td>
               <td className="mono accent2">{conflict.file}</td>
               <td className="mono path-cell">{conflict.target}</td>
-              <td><RiskChip risk={conflict.exact ? "safe" : "warn"} label={conflict.exact ? "exact" : "fallback"} /></td>
+              <td><RiskChip risk={conflict.exact ? "safe" : "warn"} label={conflict.proof ?? (conflict.exact ? "exact" : "fallback")} /></td>
               <td><span className="chip safe">{conflict.winner}</span></td>
               <td className="mono">{conflict.operations.length}</td>
             </tr>
           ))}
-          {topConflicts.length === 0 && <tr><td colSpan={6} className="muted">No conflict groups found in this context pack.</td></tr>}
+          {topConflicts.length === 0 && <tr><td colSpan={6} className="muted">No candidate groups found in this context pack.</td></tr>}
         </Table>
       </Panel>
       <SectionTitle label="Mods overview" />
@@ -252,7 +253,7 @@ function XmlBrowser({ model, setView, setSelectedFile, highlightMod, setHighligh
     <div>
       <div className="filterbar"><input className="search wide" placeholder="filter file..." value={query} onChange={(event) => setQuery(event.target.value)} /><span className="mono muted">{filtered.length} files</span></div>
       <Panel>
-        <Table headers={["", "XML file", "Patches", "Mods touching", "Conflicts", "Misses", "Risk"]}>
+        <Table headers={["", "XML file", "Patches", "Mods touching", "Groups", "Misses", "Risk"]}>
           {filtered.map((file) => (
             <tr key={file.path} onClick={() => { setSelectedFile(file.path); setView("conflict"); }}>
               <td><RiskChip risk={file.risk} dot /></td><td className="mono accent2">{file.path}</td><td className="num mono">{file.patches}</td><td><ChipList values={file.touchingMods.slice(0, 6)} /></td><td className="num mono danger-text">{file.conflicts}</td><td className="num mono critical-text">{file.missing}</td><td><RiskChip risk={file.risk} /></td>
@@ -298,7 +299,7 @@ function ConflictViewer(props: { model: UiModel; selectedConflict: string | null
       : <ThreeColumnLayout flat={flat} selected={selected} setSelected={setSelected} {...props} />;
   return (
     <div className="cv-view">
-      <div className="cv-tabs" role="tablist" aria-label="Conflict category">
+      <div className="cv-tabs" role="tablist" aria-label="Diagnostic category">
         <button type="button" role="tab" aria-selected={tab === "value"} className={tab === "value" ? "active" : ""} onClick={() => setTab("value")}>Values <span>{valueCount}</span></button>
         <button type="button" role="tab" aria-selected={tab === "structural"} className={tab === "structural" ? "active" : ""} onClick={() => setTab("structural")}>Structural <span>{structuralCount}</span></button>
       </div>
@@ -354,8 +355,15 @@ function TimelineLayout(props: { flat: FlatItem[]; selected?: FlatItem; setSelec
 }
 
 function TreePane({ flat, selected, setSelected, query = "", setQuery }: { flat: FlatItem[]; selected?: FlatItem; setSelected: (item: FlatItem) => void; query?: string; setQuery?: (value: string) => void }) {
-  const filtered = flat.filter((item) => !query || item.label.toLowerCase().includes(query.toLowerCase()));
-  return <div className="cv-pane"><div className="cv-pane-head"><span>Conflict Groups</span>{setQuery && <input className="mini-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="filter..." />}</div><div className="tree">{filtered.length === 0 ? <div className="empty compact">No conflicts in this tab.</div> : filtered.map((item, index) => <TreeNode key={index} item={item} selected={selected} onSelect={setSelected} />)}</div></div>;
+  const normalizedQuery = query.toLowerCase();
+  const filtered = flat.filter((item) => !normalizedQuery || flatSearchText(item).includes(normalizedQuery));
+  return <div className="cv-pane"><div className="cv-pane-head"><span>Candidate Groups</span>{setQuery && <input className="mini-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="filter..." />}</div><div className="tree">{filtered.length === 0 ? <div className="empty compact">No diagnostics in this tab.</div> : filtered.map((item, index) => <TreeNode key={index} item={item} selected={selected} onSelect={setSelected} />)}</div></div>;
+}
+
+function flatSearchText(item: FlatItem): string {
+  if (item.kind === "attr") return [item.label, item.attr.target, item.attr.searchText, item.attr.note, item.attr.history.map((history) => history.mod).join(" ")].filter(Boolean).join(" ").toLowerCase();
+  if (item.kind === "node") return [item.label, item.node.path, ...item.node.attrs.map((attr) => attr.searchText ?? attr.target ?? attr.name)].join(" ").toLowerCase();
+  return item.label.toLowerCase();
 }
 
 function TreeNode({ item, selected, onSelect }: { item: FlatItem; selected?: FlatItem; onSelect: (item: FlatItem) => void }) {
@@ -386,7 +394,9 @@ function HistoryPane({ item, highlightMod, setHighlightMod, timeline = false }: 
         <div className="tl-row vanilla"><span className="bullet" /><div className="mod-info"><div className="nm">vanilla</div><div className="author">7 Days to Die / Data/Config</div></div><div className="op-value"><span className="op">base</span><span className="value-cur">{attr.vanilla ?? "(unknown)"}</span></div><span className="verdict">base</span></div>
         {attr.history.map((history, index) => {
           const isWin = history.mod === attr.winner;
-          return <div key={index} className={["tl-row", isWin ? "win" : "", history.error ? "error" : "", highlightMod === history.mod ? "highlight" : ""].join(" ")} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)}><span className="bullet" /><div className="mod-info"><div className="nm"><span className="order">prio {String(history.order).padStart(2, "0")}</span><span>{history.mod}</span>{isWin && <span className="winner-tag">{finalLabel}</span>}</div><div className="author">{history.authored ? `authored: ${history.authored}` : history.error ?? "diagnostic only"}</div></div><div className="op-value"><span className={`op ${history.op}`}>{history.op}</span><span className="value-cur" title={history.value ?? ""}>{history.value ?? "(unknown)"}</span></div><span className="verdict">{history.error ? "unresolved" : isWin ? attr.finalKind === "candidate" ? "candidate" : "wins" : "shadowed"}</span></div>;
+          const fallbackStructural = attr.exact === false && (attr.category === "structural" || attr.category === "mixed");
+          const verdict = history.error ? "unresolved" : fallbackStructural ? isWin ? "candidate" : "related" : isWin ? attr.finalKind === "candidate" ? "candidate" : "wins" : "shadowed";
+          return <div key={index} className={["tl-row", isWin ? "win" : "", history.error ? "error" : "", highlightMod === history.mod ? "highlight" : ""].join(" ")} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)}><span className="bullet" /><div className="mod-info"><div className="nm"><span className="order">prio {String(history.order).padStart(2, "0")}</span><span>{history.mod}</span>{isWin && <span className="winner-tag">{finalLabel}</span>}</div><div className="author">{history.authored ? `authored: ${history.authored}` : history.error ?? "diagnostic only"}</div></div><div className="op-value"><span className={`op ${history.op}`}>{history.op}</span><span className="value-cur" title={history.value ?? ""}>{history.value ?? "(unknown)"}</span></div><span className="verdict">{verdict}</span></div>;
         })}
       </div>
       <div className="final-card"><div><div className="lab">{structural ? "Structural status" : attr.finalKind === "candidate" ? "Candidate final" : "Final value"}</div><div className="val">{attr.final ?? "(unknown)"}</div><div className="from">{attr.finalKind === "candidate" ? "candidate source" : "winner"}: {attr.winner ?? "(unknown)"}</div></div><div className="final-chips"><RiskChip risk={attr.exact === false ? "warn" : "safe"} label={proofLabel.toLowerCase()} /><RiskChip risk={attr.risk} label={finalLabel.toLowerCase()} /></div></div>
@@ -424,7 +434,7 @@ function Settings({ model }: { model: UiModel }) {
 }
 
 function TweaksPanel({ layout, setLayout, wireframe, setWireframe, accentColor, setAccentColor }: { layout: LayoutMode; setLayout: (value: LayoutMode) => void; wireframe: boolean; setWireframe: (value: boolean) => void; accentColor: string; setAccentColor: (value: string) => void }) {
-  return <div className="twk-panel"><div className="twk-hd"><b>Tweaks</b></div><div className="twk-body"><label>Conflict viewer<select value={layout} onChange={(event) => setLayout(event.target.value as LayoutMode)}><option>3-column</option><option>unified</option><option>timeline</option></select></label><label className="twk-row-h"><span>Wireframe mode</span><input type="checkbox" checked={wireframe} onChange={(event) => setWireframe(event.target.checked)} /></label><label>Accent<input type="color" value={accentColor} onChange={(event) => setAccentColor(event.target.value)} /></label></div></div>;
+  return <div className="twk-panel"><div className="twk-hd"><b>Tweaks</b></div><div className="twk-body"><label>Diagnostics viewer<select value={layout} onChange={(event) => setLayout(event.target.value as LayoutMode)}><option>3-column</option><option>unified</option><option>timeline</option></select></label><label className="twk-row-h"><span>Wireframe mode</span><input type="checkbox" checked={wireframe} onChange={(event) => setWireframe(event.target.checked)} /></label><label>Accent<input type="color" value={accentColor} onChange={(event) => setAccentColor(event.target.value)} /></label></div></div>;
 }
 
 function Kpi({ label, value, sub, risk = "" }: { label: string; value: number; sub: string; risk?: Risk | "" }) {
