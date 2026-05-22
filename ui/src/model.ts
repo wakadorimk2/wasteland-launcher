@@ -1,4 +1,4 @@
-import type { ConflictCategory, ConflictKind, ContextPack, PatchTrace, Risk, UiAttr, UiConflictEvidence, UiModel, UiNode, UiXmlFile } from "./types";
+import type { ConflictCategory, ConflictKind, ContextPack, DiagnosticGroup, PatchTrace, Risk, UiAttr, UiConflict, UiConflictEvidence, UiModel, UiNode, UiTargetRow, UiXmlFile, XmlPatchOperation } from "./types";
 
 export const conflictKinds: Record<ConflictKind, { label: string; risk: Risk; desc: string }> = {
   "xpath-miss": { label: "XPath miss", risk: "critical", desc: "The patch XPath matched no current target." },
@@ -209,6 +209,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
     final: row.final,
     summary: row.note
   }));
+  const targets = buildTargetRows(pack, operationsById, traceIndex, conflicts);
 
   return {
     source,
@@ -219,6 +220,7 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
     xmlFiles,
     xmlTree: buildTree(rows),
     conflicts,
+    targets,
     stats: {
       modsLoaded: mods.length,
       modsEnabled: mods.filter((mod) => mod.enabled).length,
@@ -256,6 +258,193 @@ interface ReviewRow {
   history: UiAttr["history"];
   winner?: string;
   note: string;
+}
+
+function buildTargetRows(pack: ContextPack, operationsById: ContextPack["operationsById"], traceIndex: Map<string, PatchTrace>, conflicts: UiConflict[]): UiTargetRow[] {
+  const conflictByTarget = new Map(conflicts.map((conflict) => [`${conflict.file}\0${conflict.target}`, conflict.id]));
+  const rows = pack.diagnosticGroups.length > 0
+    ? pack.diagnosticGroups.flatMap((group) => targetRowFromGroup(group, operationsById, traceIndex, conflictByTarget))
+    : fallbackTargetRows(pack.scan.xmlPatches, traceIndex, conflictByTarget);
+  return dedupeTargetRows(rows).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.targetName.localeCompare(b.targetName) || a.displayTarget.localeCompare(b.displayTarget));
+}
+
+function targetRowFromGroup(group: DiagnosticGroup, operationsById: ContextPack["operationsById"], traceIndex: Map<string, PatchTrace>, conflictByTarget: Map<string, string>): UiTargetRow[] {
+  const operations = group.operationIds.map((opId) => operationsById[opId]).filter((operation): operation is XmlPatchOperation => Boolean(operation)).sort(compareOperation);
+  const traces = group.operationIds.map((opId) => traceIndex.get(opId)).filter((trace): trace is PatchTrace => Boolean(trace));
+  const evidence = operations.map((operation) => operationEvidence(operation, traceIndex));
+  const displayTarget = targetIdentityForGroup(group, traces, operations);
+  const diagnosticKinds = uniqueStrings([group.kind, ...traces.map((trace) => trace.diagnosticKind)]).filter((kind): kind is ConflictKind => kind in conflictKinds);
+  const category = categoryForGroup(operations, traces);
+  const primaryWriter = operationsById[group.primaryOpId];
+  const lastWriter = primaryWriter?.modName ?? operations[operations.length - 1]?.modName;
+  const authoredXpaths = uniqueStrings(operations.map((operation) => operation.xpath).filter(Boolean));
+  const affectedSlots = affectedSlotsForTraces(traces);
+  return [{
+    id: `target:${group.file}:${group.targetKey || displayTarget}`,
+    file: group.file,
+    targetName: inferTargetName(group.file, displayTarget),
+    targetKind: inferTargetKind(group.file, displayTarget),
+    category,
+    risk: riskForConflictGroup(group, traceIndex),
+    proof: group.proof,
+    diagnosticKinds,
+    operationIds: group.operationIds,
+    mods: uniqueStrings(operations.map((operation) => operation.modName)),
+    lastWriter,
+    displayTarget,
+    authoredXpaths,
+    affectedSlots,
+    evidence: aggregatePartialEvidence(evidence.map(({ trace: _trace, ...item }) => item)),
+    conflictId: conflictByTarget.get(`${group.file}\0${displayTarget}`) ?? conflictByTarget.get(`${group.file}\0${group.normalizedXpath}`)
+  }];
+}
+
+function fallbackTargetRows(operations: XmlPatchOperation[], traceIndex: Map<string, PatchTrace>, conflictByTarget: Map<string, string>): UiTargetRow[] {
+  const rows: UiTargetRow[] = [];
+  const traces = [...traceIndex.values()];
+  if (traces.length > 0) {
+    for (const trace of traces) {
+      const operation = operations.find((candidate) => operationKey(candidate) === operationKey(trace));
+      const displayTarget = targetIdentityForTrace(trace);
+      const evidence = operation ? [operationEvidence(operation, traceIndex)] : [{
+        operationKey: operationKey(trace),
+        status: trace.status,
+        diagnosticKind: trace.diagnosticKind,
+        confidence: trace.confidence,
+        message: trace.message,
+        effects: trace.effects,
+        affectedTargets: trace.affectedTargets
+      }];
+      rows.push({
+        id: `target:${trace.file}:${displayTarget}`,
+        file: trace.file,
+        targetName: inferTargetName(trace.file, displayTarget),
+        targetKind: inferTargetKind(trace.file, displayTarget),
+        category: categoryForGroup(operation ? [operation] : [], [trace]),
+        risk: conflictKinds[trace.diagnosticKind].risk,
+        proof: trace.status === "partial" ? "partial" : "fallback",
+        diagnosticKinds: [trace.diagnosticKind],
+        operationIds: [operationKey(trace)],
+        mods: [trace.modName],
+        lastWriter: trace.modName,
+        displayTarget,
+        authoredXpaths: [trace.xpath],
+        affectedSlots: affectedSlotsForTraces([trace]),
+        evidence,
+        conflictId: conflictByTarget.get(`${trace.file}\0${displayTarget}`) ?? conflictByTarget.get(`${trace.file}\0${trace.xpath}`)
+      });
+    }
+    return rows;
+  }
+
+  for (const operation of operations) {
+    rows.push({
+      id: `target:${operation.file}:${operation.xpath}`,
+      file: operation.file,
+      targetName: inferTargetName(operation.file, operation.xpath),
+      targetKind: inferTargetKind(operation.file, operation.xpath),
+      category: categoryForGroup([operation], []),
+      risk: "info",
+      proof: "fallback",
+      diagnosticKinds: ["unknown-risk"],
+      operationIds: [operationKey(operation)],
+      mods: [operation.modName],
+      lastWriter: operation.modName,
+      displayTarget: operation.xpath,
+      authoredXpaths: [operation.xpath],
+      affectedSlots: [],
+      evidence: [operationEvidence(operation, traceIndex)],
+      conflictId: conflictByTarget.get(`${operation.file}\0${operation.xpath}`)
+    });
+  }
+  return rows;
+}
+
+function dedupeTargetRows(rows: UiTargetRow[]): UiTargetRow[] {
+  const byKey = new Map<string, UiTargetRow>();
+  for (const row of rows) {
+    const key = `${row.file}\0${row.displayTarget}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, row);
+      continue;
+    }
+    byKey.set(key, {
+      ...existing,
+      risk: highestRisk([existing.risk, row.risk]),
+      proof: proofRank(row.proof) > proofRank(existing.proof) ? row.proof : existing.proof,
+      diagnosticKinds: uniqueStrings([...existing.diagnosticKinds, ...row.diagnosticKinds]) as ConflictKind[],
+      operationIds: uniqueStrings([...existing.operationIds, ...row.operationIds]),
+      mods: uniqueStrings([...existing.mods, ...row.mods]),
+      lastWriter: row.lastWriter ?? existing.lastWriter,
+      authoredXpaths: uniqueStrings([...existing.authoredXpaths, ...row.authoredXpaths]),
+      affectedSlots: uniqueStrings([...existing.affectedSlots, ...row.affectedSlots]),
+      evidence: [...existing.evidence, ...row.evidence],
+      conflictId: existing.conflictId ?? row.conflictId
+    });
+  }
+  return [...byKey.values()];
+}
+
+function targetIdentityForGroup(group: DiagnosticGroup, traces: PatchTrace[], operations: XmlPatchOperation[]): string {
+  const effect = traces.flatMap((trace) => trace.effects).find((candidate) => candidate.targetKey || candidate.displayTarget || candidate.target);
+  if (effect?.targetKey) return effect.displayTarget ?? effect.target ?? effect.targetKey;
+  if (effect?.displayTarget) return effect.displayTarget;
+  const affected = traces.flatMap((trace) => trace.affectedTargets).find((target) => target.canonical);
+  return affected?.canonical ?? group.displayTarget ?? group.normalizedXpath ?? operations[0]?.xpath ?? group.targetKey;
+}
+
+function targetIdentityForTrace(trace: PatchTrace): string {
+  const effect = trace.effects.find((candidate) => candidate.targetKey || candidate.displayTarget || candidate.target);
+  if (effect?.targetKey) return effect.displayTarget ?? effect.target ?? effect.targetKey;
+  if (effect?.displayTarget) return effect.displayTarget;
+  return trace.affectedTargets[0]?.canonical ?? trace.xpath;
+}
+
+function affectedSlotsForTraces(traces: PatchTrace[]): string[] {
+  return uniqueStrings(traces.flatMap((trace) => [
+    ...trace.effects.flatMap((effect) => [effect.targetKey, effect.provenance?.slotKey, effect.provenance?.childSlot, effect.target].filter((value): value is string => Boolean(value))),
+    ...trace.affectedTargets.map((target) => target.canonical)
+  ]));
+}
+
+function inferTargetKind(file: string, target: string): string {
+  const lower = file.toLowerCase();
+  const entity = entityFromTarget(target);
+  if (lower === "items.xml") return entity?.kind ?? "item";
+  if (lower === "blocks.xml") return entity?.kind ?? "block";
+  if (lower === "windows.xml") return entity?.kind ?? "window";
+  if (lower === "entityclasses.xml") return entity?.kind ?? "entity_class";
+  if (lower === "recipes.xml") return entity?.kind ?? "recipe";
+  if (lower === "loot.xml") return entity?.kind ?? "loot";
+  if (lower === "progression.xml") return entity?.kind ?? "progression";
+  if (lower === "action_sequence.xml") return entity?.kind ?? "action_sequence";
+  return entity?.kind ?? (targetName(target).replace(/\[[^\]]+\]/g, "") || "target");
+}
+
+function inferTargetName(file: string, target: string): string {
+  const entity = entityFromTarget(target);
+  if (entity) return entity.name;
+  const attr = target.match(/\/@([\w.-]+)$/)?.[1];
+  if (attr) return `@${attr}`;
+  const named = target.match(/\[@(?:name|id)=['"]([^'"]+)['"]\]/)?.[1];
+  if (named) return named;
+  return `${file}:${targetName(target).replace(/\[[^\]]+\]/g, "")}`;
+}
+
+function entityFromTarget(target: string): { kind: string; name: string } | undefined {
+  const matches = [...target.matchAll(/\/([\w.-]+)\[@(?:name|id)=['"]([^'"]+)['"]\]/g)];
+  const match = matches[matches.length - 1];
+  if (!match) return undefined;
+  return { kind: match[1], name: match[2] };
+}
+
+function proofRank(proof: DiagnosticGroup["proof"]): number {
+  return { fallback: 0, footprint: 1, partial: 2, exact: 3 }[proof];
+}
+
+function uniqueStrings<T extends string>(values: T[]): T[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function buildConflictGroupRows(groups: ContextPack["diagnosticGroups"], operationsById: ContextPack["operationsById"], traceIndex: Map<string, PatchTrace>): ReviewRow[] {

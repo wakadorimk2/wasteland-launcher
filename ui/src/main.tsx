@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { loadInitialModel, readContextFile } from "./dataLoader";
 import { conflictKinds } from "./model";
-import type { ConflictCategory, LayoutMode, Risk, UiAttr, UiModel, UiNode, ViewId } from "./types";
+import type { ConflictCategory, LayoutMode, Risk, UiAttr, UiModel, UiNode, UiTargetRow, ViewId } from "./types";
 import "./styles.css";
 
 const tweakDefaults = {
@@ -17,6 +17,7 @@ function App() {
   const [view, setView] = useState<ViewId>("dashboard");
   const [highlightMod, setHighlightMod] = useState<string | null>(null);
   const [selectedConflict, setSelectedConflict] = useState<string | null>(null);
+  const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [layout, setLayout] = useState<LayoutMode>(tweakDefaults.conflictLayout);
   const [wireframe, setWireframe] = useState(tweakDefaults.wireframe);
@@ -75,7 +76,8 @@ function App() {
         <div className="main-content">
           {view === "dashboard" && <Dashboard model={model} setView={setView} setSelectedConflict={setSelectedConflict} />}
           {view === "load-order" && <LoadOrderView model={model} highlightMod={highlightMod} setHighlightMod={setHighlightMod} />}
-          {view === "xml-browser" && <XmlBrowser model={model} setView={setView} setSelectedFile={setSelectedFile} highlightMod={highlightMod} setHighlightMod={setHighlightMod} />}
+          {view === "xml-browser" && <XmlBrowser model={model} setView={setView} setSelectedFile={setSelectedFile} setSelectedConflict={setSelectedConflict} selectedTarget={selectedTarget} setSelectedTarget={setSelectedTarget} highlightMod={highlightMod} setHighlightMod={setHighlightMod} />}
+          {view === "target-inspector" && <TargetInspector model={model} setView={setView} setSelectedFile={setSelectedFile} setSelectedConflict={setSelectedConflict} selectedTarget={selectedTarget} setSelectedTarget={setSelectedTarget} />}
           {view === "conflict" && (
             <ConflictViewer
               model={model}
@@ -112,6 +114,7 @@ function viewMeta(view: ViewId, selectedFile: string | null, model: UiModel) {
     dashboard: { title: "Dashboard", crumbs: ["analyzer", model.profile, "overview"] },
     "load-order": { title: "Mod Load Order", crumbs: ["analyzer", "mods", "load-order"] },
     "xml-browser": { title: "XML Target Browser", crumbs: ["analyzer", "xml"] },
+    "target-inspector": { title: "Target Inspector", crumbs: ["analyzer", "targets", "inspect"] },
     conflict: { title: "Diagnostics", crumbs: ["analyzer", "trace", selectedFile ?? "browse"] },
     settings: { title: "Settings", crumbs: ["analyzer", "settings"] }
   };
@@ -122,7 +125,8 @@ function Sidebar({ model, view, setView }: { model: UiModel; view: ViewId; setVi
   const views: { id: ViewId; label: string; glyph: string; count?: number }[] = [
     { id: "dashboard", label: "Dashboard", glyph: "D" },
     { id: "load-order", label: "Load Order", glyph: "L", count: model.mods.length },
-    { id: "xml-browser", label: "XML Browser", glyph: "X", count: model.xmlFiles.length },
+    { id: "xml-browser", label: "XML Browser", glyph: "X", count: model.targets.length },
+    { id: "target-inspector", label: "Target Inspector", glyph: "T", count: model.targets.length },
     { id: "conflict", label: "Diagnostics", glyph: "D", count: model.conflicts.length },
     { id: "settings", label: "Settings", glyph: "S" }
   ];
@@ -246,21 +250,34 @@ function LoadOrderView({ model, highlightMod, setHighlightMod }: { model: UiMode
   );
 }
 
-function XmlBrowser({ model, setView, setSelectedFile, highlightMod, setHighlightMod }: { model: UiModel; setView: (view: ViewId) => void; setSelectedFile: (file: string) => void; highlightMod: string | null; setHighlightMod: (id: string | null) => void }) {
+function XmlBrowser({ model, setView, setSelectedFile, setSelectedConflict, selectedTarget, setSelectedTarget, highlightMod, setHighlightMod }: { model: UiModel; setView: (view: ViewId) => void; setSelectedFile: (file: string) => void; setSelectedConflict: (id: string) => void; selectedTarget: string | null; setSelectedTarget: (id: string | null) => void; highlightMod: string | null; setHighlightMod: (id: string | null) => void }) {
   const [query, setQuery] = useState("");
-  const filtered = model.xmlFiles.filter((file) => file.path.toLowerCase().includes(query.toLowerCase()));
+  const [fileFacet, setFileFacet] = useState("all");
+  const [categoryFacet, setCategoryFacet] = useState("all");
+  const [riskFacet, setRiskFacet] = useState("all");
+  const filtered = filterTargets(model.targets, { query, file: fileFacet, category: categoryFacet, risk: riskFacet });
+  const selected = filtered.find((target) => target.id === selectedTarget) ?? filtered[0];
+  useEffect(() => {
+    if (selected && selected.id !== selectedTarget) setSelectedTarget(selected.id);
+  }, [selected, selectedTarget, setSelectedTarget]);
   return (
-    <div>
-      <div className="filterbar"><input className="search wide" placeholder="filter file..." value={query} onChange={(event) => setQuery(event.target.value)} /><span className="mono muted">{filtered.length} files</span></div>
-      <Panel>
-        <Table headers={["", "XML file", "Patches", "Mods touching", "Groups", "Misses", "Risk"]}>
-          {filtered.map((file) => (
-            <tr key={file.path} onClick={() => { setSelectedFile(file.path); setView("conflict"); }}>
-              <td><RiskChip risk={file.risk} dot /></td><td className="mono accent2">{file.path}</td><td className="num mono">{file.patches}</td><td><ChipList values={file.touchingMods.slice(0, 6)} /></td><td className="num mono danger-text">{file.conflicts}</td><td className="num mono critical-text">{file.missing}</td><td><RiskChip risk={file.risk} /></td>
-            </tr>
-          ))}
-        </Table>
-      </Panel>
+    <div className="target-page">
+      <div className="filterbar"><input className="search wide" placeholder="filter target, xpath, mod..." value={query} onChange={(event) => setQuery(event.target.value)} /><span className="mono muted">{filtered.length} targets</span></div>
+      <div className="target-shell">
+        <TargetFacetRail
+          targets={model.targets}
+          fileFacet={fileFacet}
+          setFileFacet={setFileFacet}
+          categoryFacet={categoryFacet}
+          setCategoryFacet={setCategoryFacet}
+          riskFacet={riskFacet}
+          setRiskFacet={setRiskFacet}
+        />
+        <Panel className="target-list-panel">
+          <TargetTable targets={filtered} selected={selected} onSelect={(target) => setSelectedTarget(target.id)} />
+        </Panel>
+        <TargetDetail target={selected} setView={setView} setSelectedFile={setSelectedFile} setSelectedConflict={setSelectedConflict} />
+      </div>
       <SectionTitle label="File patch heatmap by mod" />
       <Panel className="bottom-panel table-scroll">
         <table className="table heat-table">
@@ -270,6 +287,171 @@ function XmlBrowser({ model, setView, setSelectedFile, highlightMod, setHighligh
       </Panel>
     </div>
   );
+}
+
+function TargetInspector({ model, setView, setSelectedFile, setSelectedConflict, selectedTarget, setSelectedTarget }: { model: UiModel; setView: (view: ViewId) => void; setSelectedFile: (file: string) => void; setSelectedConflict: (id: string) => void; selectedTarget: string | null; setSelectedTarget: (id: string | null) => void }) {
+  const [query, setQuery] = useState("");
+  const [fileFacet, setFileFacet] = useState("all");
+  const [categoryFacet, setCategoryFacet] = useState("all");
+  const [riskFacet, setRiskFacet] = useState("all");
+  const [proofFacet, setProofFacet] = useState("all");
+  const [kindFacet, setKindFacet] = useState("all");
+  const [modFacet, setModFacet] = useState("all");
+  const [flagFacet, setFlagFacet] = useState("all");
+  const [groupBy, setGroupBy] = useState<"file" | "category" | "risk" | "lastWriter">("file");
+  const filtered = filterTargets(model.targets, { query, file: fileFacet, category: categoryFacet, risk: riskFacet, proof: proofFacet, kind: kindFacet, mod: modFacet, flag: flagFacet });
+  const groups = groupTargets(filtered, groupBy);
+  const selected = filtered.find((target) => target.id === selectedTarget) ?? filtered[0];
+  useEffect(() => {
+    if (selected && selected.id !== selectedTarget) setSelectedTarget(selected.id);
+  }, [selected, selectedTarget, setSelectedTarget]);
+  return (
+    <div className="target-page inspector-page">
+      <div className="filterbar">
+        <input className="search wide" placeholder="search target, file, xpath, mod..." value={query} onChange={(event) => setQuery(event.target.value)} />
+        <select className="mini-select" value={groupBy} onChange={(event) => setGroupBy(event.target.value as typeof groupBy)}>
+          <option value="file">Group by file</option>
+          <option value="category">Group by category</option>
+          <option value="risk">Group by risk</option>
+          <option value="lastWriter">Group by last writer</option>
+        </select>
+        <span className="mono muted">{filtered.length} targets</span>
+      </div>
+      <div className="target-shell inspector-shell">
+        <div className="target-facets">
+          <FacetGroup label="File" values={facetValues(model.targets.map((target) => target.file))} selected={fileFacet} onSelect={setFileFacet} />
+          <FacetGroup label="Category" values={facetValues(model.targets.map((target) => target.category))} selected={categoryFacet} onSelect={setCategoryFacet} />
+          <FacetGroup label="Risk" values={facetValues(model.targets.map((target) => target.risk), riskRankDesc)} selected={riskFacet} onSelect={setRiskFacet} />
+          <FacetGroup label="Proof" values={facetValues(model.targets.map((target) => target.proof))} selected={proofFacet} onSelect={setProofFacet} />
+          <FacetGroup label="Diagnostic" values={facetValues(model.targets.flatMap((target) => target.diagnosticKinds))} selected={kindFacet} onSelect={setKindFacet} />
+          <FacetGroup label="Mod" values={facetValues(model.targets.flatMap((target) => target.mods))} selected={modFacet} onSelect={setModFacet} />
+          <FacetGroup label="Flags" values={["has conflict", "fallback proof", "multi mod"]} selected={flagFacet} onSelect={setFlagFacet} />
+        </div>
+        <Panel className="target-list-panel grouped-targets">
+          {groups.map((group) => (
+            <div className="target-group" key={group.label}>
+              <div className="target-group-head"><span>{group.label}</span><span className="count">{group.targets.length}</span></div>
+              <TargetTable targets={group.targets} selected={selected} onSelect={(target) => setSelectedTarget(target.id)} compact />
+            </div>
+          ))}
+          {groups.length === 0 && <div className="empty compact">No targets match these filters.</div>}
+        </Panel>
+        <TargetDetail target={selected} setView={setView} setSelectedFile={setSelectedFile} setSelectedConflict={setSelectedConflict} />
+      </div>
+    </div>
+  );
+}
+
+function TargetFacetRail({ targets, fileFacet, setFileFacet, categoryFacet, setCategoryFacet, riskFacet, setRiskFacet }: { targets: UiTargetRow[]; fileFacet: string; setFileFacet: (value: string) => void; categoryFacet: string; setCategoryFacet: (value: string) => void; riskFacet: string; setRiskFacet: (value: string) => void }) {
+  return (
+    <div className="target-facets">
+      <FacetGroup label="File" values={facetValues(targets.map((target) => target.file))} selected={fileFacet} onSelect={setFileFacet} />
+      <FacetGroup label="Category" values={facetValues(targets.map((target) => target.category))} selected={categoryFacet} onSelect={setCategoryFacet} />
+      <FacetGroup label="Risk" values={facetValues(targets.map((target) => target.risk), riskRankDesc)} selected={riskFacet} onSelect={setRiskFacet} />
+    </div>
+  );
+}
+
+function TargetTable({ targets, selected, onSelect, compact = false }: { targets: UiTargetRow[]; selected?: UiTargetRow; onSelect: (target: UiTargetRow) => void; compact?: boolean }) {
+  return (
+    <div className="table-wrap">
+      <table className="table target-table">
+        <thead><tr><th>Risk</th><th>Target name</th><th>Category</th><th>Proof</th><th>Diagnostics</th><th>Mods</th><th>Last writer</th></tr></thead>
+        <tbody>
+          {targets.map((target) => (
+            <tr key={target.id} className={selected?.id === target.id ? "selected-row" : ""} onClick={() => onSelect(target)}>
+              <td><RiskChip risk={target.risk} dot /></td>
+              <td><div className="target-name"><strong>{target.targetName}</strong><span className="mono muted">{target.file} :: {target.displayTarget}</span></div></td>
+              <td><span className="chip info">{target.category}</span></td>
+              <td><ProofChip proof={target.proof} /></td>
+              <td><ChipList values={target.diagnosticKinds.slice(0, compact ? 2 : 4).map((kind) => conflictKinds[kind].label)} /></td>
+              <td><ChipList values={target.mods.slice(0, compact ? 2 : 4)} /></td>
+              <td className="mono">{target.lastWriter ?? "(unknown)"}</td>
+            </tr>
+          ))}
+          {targets.length === 0 && <tr><td colSpan={7} className="muted">No targets match these filters.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TargetDetail({ target, setView, setSelectedFile, setSelectedConflict }: { target?: UiTargetRow; setView: (view: ViewId) => void; setSelectedFile: (file: string) => void; setSelectedConflict: (id: string) => void }) {
+  if (!target) return <Panel className="target-detail"><div className="empty compact">Select a target.</div></Panel>;
+  return (
+    <Panel className="target-detail">
+      <div className="target-detail-head">
+        <RiskChip risk={target.risk} dot />
+        <div><h2>{target.targetName}</h2><div className="mono muted">{target.file} :: {target.displayTarget}</div></div>
+      </div>
+      <DetailBlock label="Proof conclusion">
+        <div className="detail-line"><ProofChip proof={target.proof} /><span>{target.diagnosticKinds.map((kind) => conflictKinds[kind].label).join(", ") || "No diagnostic kind"}</span></div>
+      </DetailBlock>
+      <DetailBlock label="Affected slots">
+        <ChipList values={target.affectedSlots.slice(0, 12)} />
+        {target.affectedSlots.length === 0 && <span className="muted">No replay slot was attached.</span>}
+      </DetailBlock>
+      <DetailBlock label="Replay evidence">
+        <div className="evidence-list">{target.evidence.map((item) => <div className="evidence-block" key={item.operationKey}><div className="mono muted">{item.operationKey.replaceAll("\0", " / ")}</div><div className="evidence-chips"><RiskChip risk={item.diagnosticKind && item.diagnosticKind !== "ok" ? conflictKinds[item.diagnosticKind].risk : "safe"} label={item.status ?? "not traced"} />{item.confidence && <span className="chip info">{item.confidence}</span>}</div><div className="muted">{item.message ?? (item.effects.map((effect) => `${effect.kind}: ${effect.displayTarget ?? effect.target}`).join(", ") || "No replay effect was attached.")}</div></div>)}</div>
+      </DetailBlock>
+      <DetailBlock label="Operation timeline">
+        <div className="mini-timeline">{target.mods.map((mod, index) => <div key={`${mod}-${index}`} className={mod === target.lastWriter ? "active" : ""}><span className="bullet" /><span className="mono">{mod}</span>{mod === target.lastWriter && <span className="winner-tag">LAST</span>}</div>)}</div>
+      </DetailBlock>
+      <DetailBlock label="Flag reasons">
+        <ChipList values={[target.conflictId ? "has conflict" : "inventory target", target.mods.length > 1 ? "multi mod" : "single mod", target.proof === "exact" ? "exact replay" : "fallback proof"]} />
+      </DetailBlock>
+      <DetailBlock label="Authored XPath">
+        <ul className="xpath-list">{target.authoredXpaths.map((xpath) => <li key={xpath} className="mono">{xpath}</li>)}</ul>
+      </DetailBlock>
+      <div className="detail-actions">
+        {target.conflictId && <button className="btn" type="button" onClick={() => { setSelectedConflict(target.conflictId!); setView("conflict"); }}>Open Diagnostics</button>}
+        <button className="btn" type="button" onClick={() => { setSelectedFile(target.file); setView("conflict"); }}>Open File Diagnostics</button>
+      </div>
+    </Panel>
+  );
+}
+
+function DetailBlock({ label, children }: { label: string; children: React.ReactNode }) {
+  return <div className="detail-block"><div className="lab">{label}</div>{children}</div>;
+}
+
+function FacetGroup({ label, values, selected, onSelect }: { label: string; values: string[]; selected: string; onSelect: (value: string) => void }) {
+  return <div className="facet-group"><div className="sidebar-section-title">{label}</div><button type="button" className={selected === "all" ? "active" : ""} onClick={() => onSelect("all")}>All</button>{values.slice(0, 24).map((value) => <button key={value} type="button" className={selected === value ? "active" : ""} onClick={() => onSelect(value)} title={value}>{value}</button>)}</div>;
+}
+
+function ProofChip({ proof }: { proof: UiTargetRow["proof"] }) {
+  return <span className={`proof-chip ${proof}`}>{proof}</span>;
+}
+
+function filterTargets(targets: UiTargetRow[], filters: { query?: string; file?: string; category?: string; risk?: string; proof?: string; kind?: string; mod?: string; flag?: string }): UiTargetRow[] {
+  const query = (filters.query ?? "").toLowerCase();
+  return targets.filter((target) => {
+    if (filters.file && filters.file !== "all" && target.file !== filters.file) return false;
+    if (filters.category && filters.category !== "all" && target.category !== filters.category) return false;
+    if (filters.risk && filters.risk !== "all" && target.risk !== filters.risk) return false;
+    if (filters.proof && filters.proof !== "all" && target.proof !== filters.proof) return false;
+    if (filters.kind && filters.kind !== "all" && !target.diagnosticKinds.some((kind) => kind === filters.kind)) return false;
+    if (filters.mod && filters.mod !== "all" && !target.mods.includes(filters.mod)) return false;
+    if (filters.flag === "has conflict" && !target.conflictId) return false;
+    if (filters.flag === "fallback proof" && target.proof === "exact") return false;
+    if (filters.flag === "multi mod" && target.mods.length < 2) return false;
+    if (!query) return true;
+    return [target.targetName, target.file, target.displayTarget, ...target.authoredXpaths, ...target.mods].join(" ").toLowerCase().includes(query);
+  });
+}
+
+function groupTargets(targets: UiTargetRow[], by: "file" | "category" | "risk" | "lastWriter") {
+  const groups = new Map<string, UiTargetRow[]>();
+  for (const target of targets) {
+    const key = by === "lastWriter" ? target.lastWriter ?? "(unknown)" : target[by];
+    groups.set(key, [...(groups.get(key) ?? []), target]);
+  }
+  return [...groups.entries()].map(([label, groupTargets]) => ({ label, targets: groupTargets })).sort((a, b) => riskRankDesc(a.label, b.label) || a.label.localeCompare(b.label));
+}
+
+function facetValues(values: string[], sorter?: (a: string, b: string) => number): string[] {
+  const unique = [...new Set(values.filter(Boolean))];
+  return sorter ? unique.sort(sorter) : unique.sort((a, b) => a.localeCompare(b));
 }
 
 function ConflictViewer(props: { model: UiModel; selectedConflict: string | null; selectedFile: string | null; layout: LayoutMode; setView: (view: ViewId) => void; highlightMod: string | null; setHighlightMod: (id: string | null) => void }) {
@@ -487,6 +669,11 @@ function riskFromConflicts(risks: Risk[]): Risk {
 
 function riskRank(risk: Risk): number {
   return { safe: 0, info: 1, warn: 2, danger: 3, critical: 4 }[risk];
+}
+
+function riskRankDesc(a: string, b: string): number {
+  const rank = (value: string) => value in { safe: 0, info: 1, warn: 2, danger: 3, critical: 4 } ? riskRank(value as Risk) : -1;
+  return rank(b) - rank(a);
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

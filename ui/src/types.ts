@@ -2,7 +2,7 @@ export type Risk = "safe" | "info" | "warn" | "danger" | "critical";
 export type ConflictKind = "xpath-miss" | "order-induced-miss" | "dependency-order-miss" | "silent-overwrite" | "structural-mask" | "slot-order-dependent" | "sibling-order-dependent" | "broad-match-risk" | "unsupported-operation" | "parse-error" | "ambiguous-target" | "unknown-risk" | "ok";
 export type ConflictCategory = "value" | "structural" | "mixed";
 export type LayoutMode = "3-column" | "unified" | "timeline";
-export type ViewId = "dashboard" | "load-order" | "xml-browser" | "conflict" | "settings";
+export type ViewId = "dashboard" | "load-order" | "xml-browser" | "target-inspector" | "conflict" | "settings";
 
 export interface ModlistEntry {
   raw: string;
@@ -248,6 +248,25 @@ export interface UiConflict {
   summary: string;
 }
 
+export interface UiTargetRow {
+  id: string;
+  file: string;
+  targetName: string;
+  targetKind: string;
+  category: ConflictCategory;
+  risk: Risk;
+  proof: DiagnosticGroup["proof"];
+  diagnosticKinds: ConflictKind[];
+  operationIds: string[];
+  mods: string[];
+  lastWriter?: string;
+  displayTarget: string;
+  authoredXpaths: string[];
+  affectedSlots: string[];
+  evidence: UiConflictEvidence[];
+  conflictId?: string;
+}
+
 export interface UiModel {
   source: "sample" | "context";
   generatedAt: string;
@@ -257,6 +276,7 @@ export interface UiModel {
   xmlFiles: UiXmlFile[];
   xmlTree: Record<string, { children: UiNode[] }>;
   conflicts: UiConflict[];
+  targets: UiTargetRow[];
   stats: {
     modsLoaded: number;
     modsEnabled: number;
