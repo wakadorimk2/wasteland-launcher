@@ -204,6 +204,7 @@ export interface UiAttr {
   conflictId: string;
   name: string;
   target?: string;
+  searchText?: string;
   category: ConflictCategory;
   finalKind?: "final" | "candidate" | "status";
   vanilla: string | null;

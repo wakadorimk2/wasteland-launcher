@@ -355,8 +355,15 @@ function TimelineLayout(props: { flat: FlatItem[]; selected?: FlatItem; setSelec
 }
 
 function TreePane({ flat, selected, setSelected, query = "", setQuery }: { flat: FlatItem[]; selected?: FlatItem; setSelected: (item: FlatItem) => void; query?: string; setQuery?: (value: string) => void }) {
-  const filtered = flat.filter((item) => !query || item.label.toLowerCase().includes(query.toLowerCase()));
+  const normalizedQuery = query.toLowerCase();
+  const filtered = flat.filter((item) => !normalizedQuery || flatSearchText(item).includes(normalizedQuery));
   return <div className="cv-pane"><div className="cv-pane-head"><span>Candidate Groups</span>{setQuery && <input className="mini-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="filter..." />}</div><div className="tree">{filtered.length === 0 ? <div className="empty compact">No diagnostics in this tab.</div> : filtered.map((item, index) => <TreeNode key={index} item={item} selected={selected} onSelect={setSelected} />)}</div></div>;
+}
+
+function flatSearchText(item: FlatItem): string {
+  if (item.kind === "attr") return [item.label, item.attr.target, item.attr.searchText, item.attr.note, item.attr.history.map((history) => history.mod).join(" ")].filter(Boolean).join(" ").toLowerCase();
+  if (item.kind === "node") return [item.label, item.node.path, ...item.node.attrs.map((attr) => attr.searchText ?? attr.target ?? attr.name)].join(" ").toLowerCase();
+  return item.label.toLowerCase();
 }
 
 function TreeNode({ item, selected, onSelect }: { item: FlatItem; selected?: FlatItem; onSelect: (item: FlatItem) => void }) {
@@ -387,7 +394,9 @@ function HistoryPane({ item, highlightMod, setHighlightMod, timeline = false }: 
         <div className="tl-row vanilla"><span className="bullet" /><div className="mod-info"><div className="nm">vanilla</div><div className="author">7 Days to Die / Data/Config</div></div><div className="op-value"><span className="op">base</span><span className="value-cur">{attr.vanilla ?? "(unknown)"}</span></div><span className="verdict">base</span></div>
         {attr.history.map((history, index) => {
           const isWin = history.mod === attr.winner;
-          return <div key={index} className={["tl-row", isWin ? "win" : "", history.error ? "error" : "", highlightMod === history.mod ? "highlight" : ""].join(" ")} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)}><span className="bullet" /><div className="mod-info"><div className="nm"><span className="order">prio {String(history.order).padStart(2, "0")}</span><span>{history.mod}</span>{isWin && <span className="winner-tag">{finalLabel}</span>}</div><div className="author">{history.authored ? `authored: ${history.authored}` : history.error ?? "diagnostic only"}</div></div><div className="op-value"><span className={`op ${history.op}`}>{history.op}</span><span className="value-cur" title={history.value ?? ""}>{history.value ?? "(unknown)"}</span></div><span className="verdict">{history.error ? "unresolved" : isWin ? attr.finalKind === "candidate" ? "candidate" : "wins" : "shadowed"}</span></div>;
+          const fallbackStructural = attr.exact === false && (attr.category === "structural" || attr.category === "mixed");
+          const verdict = history.error ? "unresolved" : fallbackStructural ? isWin ? "candidate" : "related" : isWin ? attr.finalKind === "candidate" ? "candidate" : "wins" : "shadowed";
+          return <div key={index} className={["tl-row", isWin ? "win" : "", history.error ? "error" : "", highlightMod === history.mod ? "highlight" : ""].join(" ")} onMouseEnter={() => setHighlightMod(history.mod)} onMouseLeave={() => setHighlightMod(null)}><span className="bullet" /><div className="mod-info"><div className="nm"><span className="order">prio {String(history.order).padStart(2, "0")}</span><span>{history.mod}</span>{isWin && <span className="winner-tag">{finalLabel}</span>}</div><div className="author">{history.authored ? `authored: ${history.authored}` : history.error ?? "diagnostic only"}</div></div><div className="op-value"><span className={`op ${history.op}`}>{history.op}</span><span className="value-cur" title={history.value ?? ""}>{history.value ?? "(unknown)"}</span></div><span className="verdict">{verdict}</span></div>;
         })}
       </div>
       <div className="final-card"><div><div className="lab">{structural ? "Structural status" : attr.finalKind === "candidate" ? "Candidate final" : "Final value"}</div><div className="val">{attr.final ?? "(unknown)"}</div><div className="from">{attr.finalKind === "candidate" ? "candidate source" : "winner"}: {attr.winner ?? "(unknown)"}</div></div><div className="final-chips"><RiskChip risk={attr.exact === false ? "warn" : "safe"} label={proofLabel.toLowerCase()} /><RiskChip risk={attr.risk} label={finalLabel.toLowerCase()} /></div></div>

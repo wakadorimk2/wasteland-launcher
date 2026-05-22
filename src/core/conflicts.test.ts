@@ -94,6 +94,44 @@ test("earlier miss against later append target groups missed operation with crea
   }
 });
 
+test("/items append operations are not mixed into a specific item structural-mask footprint group", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old"/><item name="keep"/></items>`);
+  try {
+    const { diagnosticGroups, operationsById } = await detectConflicts([
+      op("RemoveOld", 1, "items.xml", "/items/item[@name='old']", "remove"),
+      op("AppendNew", 2, "items.xml", "/items", "append", `<item name="new"/>`, "xml", "<item new>"),
+      op("EditOld", 3, "items.xml", "/items/item[@name='old']/@value", "set", "2")
+    ], fixture.gamePath);
+
+    const oldGroups = diagnosticGroups.filter((group) => group.displayTarget.includes("old"));
+    assert.equal(oldGroups.some((group) => group.operationIds.some((opId) => operationsById[opId].modName === "AppendNew")), false);
+    assert.equal(oldGroups.some((group) => group.kind === "order-induced-miss" || group.kind === "structural-mask"), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("insertBefore reads a removed anchor as an order-dependent candidate", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old"/></items>`);
+  try {
+    const { diagnosticGroups, operationsById } = await detectConflicts([
+      op("RemoveOld", 1, "items.xml", "/items/item[@name='old']", "remove"),
+      op("InsertAtOld", 2, "items.xml", "/items/item[@name='old']", "insertbefore", `<item name="new"/>`, "xml", "<item new>")
+    ], fixture.gamePath);
+
+    assert.equal(diagnosticGroups.some((group) =>
+      group.kind === "sibling-order-dependent"
+      && group.operationIds.map((opId) => operationsById[opId].modName).includes("InsertAtOld")
+    ), true);
+    assert.equal(diagnosticGroups.some((group) =>
+      group.kind === "structural-mask"
+      && group.operationIds.map((opId) => operationsById[opId].modName).includes("InsertAtOld")
+    ), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("missing vanilla file falls back to footprint and normalized XPath conflict detection", async () => {
   const fixture = await makeEmptyGameFixture();
   try {

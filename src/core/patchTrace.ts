@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { DOMParser, XMLSerializer } from "@xmldom/xmldom";
 import * as xpath from "xpath";
 import { PatchTrace, PatchTraceEffect, PatchTraceTarget, ScanWarning, XmlPatchOperation } from "./types.js";
@@ -9,6 +9,7 @@ const defaultGamePath = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\7 Da
 const serializer = new XMLSerializer();
 const keyAttributes = ["name", "id", "class", "type", "value"];
 const broadReplayTargetLimit = 100;
+const simpleXPathCache = new Map<string, SimpleXPath | undefined>();
 
 type XmlDocument = ReturnType<DOMParser["parseFromString"]>;
 type DomNode = any;
@@ -40,7 +41,51 @@ interface AppliedPatchEffect {
 export interface TraceOptions {
   mode?: "fast" | "exact";
   tracePath?: string;
+  traceProfilePath?: string;
   timeoutMs?: number;
+  onProgress?: (progress: PatchTraceProgress) => void;
+}
+
+export interface PatchTraceProgress {
+  phase: "start" | "file-start" | "operation" | "file-complete" | "file-skipped" | "done";
+  file?: string;
+  fileIndex?: number;
+  fileCount?: number;
+  fileOperations?: number;
+  fileProcessed?: number;
+  totalOperations: number;
+  processedOperations: number;
+  elapsedMs: number;
+  message?: string;
+}
+
+export interface PatchTraceProfileFile {
+  file: string;
+  operations: number;
+  replayed: number;
+  partial: number;
+  elapsedMs: number;
+  xpathFastPath: number;
+  xpathFallback: number;
+  indexRebuilds: number;
+  indexUpdates: number;
+}
+
+export interface PatchTraceProfile {
+  generatedAt: string;
+  mode: "fast" | "exact";
+  timeoutMs: number;
+  operations: number;
+  replayed: number;
+  partial: number;
+  elapsedMs: number;
+  files: PatchTraceProfileFile[];
+}
+
+interface MutablePatchTraceProfileFile extends PatchTraceProfileFile {}
+
+interface ReplayMetrics {
+  profile: MutablePatchTraceProfileFile;
 }
 
 export function defaultGameInstallPath(): string {
@@ -53,17 +98,69 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
   const byFile = groupBy(operations, (operation) => operation.file);
   const timeoutMs = options.timeoutMs ?? 8_000;
   const fileEntries = Array.from(byFile.entries());
+  const startedAt = Date.now();
+  const profileFiles: MutablePatchTraceProfileFile[] = [];
+  let processedOperations = 0;
+  emitProgress(options, {
+    phase: "start",
+    totalOperations: operations.length,
+    processedOperations,
+    elapsedMs: 0,
+    message: `Replaying ${operations.length} XML patch operation(s) across ${fileEntries.length} file(s)`
+  });
 
   for (const [fileIndex, [file, fileOperations]] of fileEntries.entries()) {
     const fileStartedAt = Date.now();
+    const sortedOperations = sortOperations(fileOperations);
+    const profileFile: MutablePatchTraceProfileFile = {
+      file,
+      operations: sortedOperations.length,
+      replayed: 0,
+      partial: 0,
+      elapsedMs: 0,
+      xpathFastPath: 0,
+      xpathFallback: 0,
+      indexRebuilds: 0,
+      indexUpdates: 0
+    };
+    profileFiles.push(profileFile);
+    const metrics: ReplayMetrics = { profile: profileFile };
+    let fileProcessed = 0;
+    emitProgress(options, {
+      phase: "file-start",
+      file,
+      fileIndex: fileIndex + 1,
+      fileCount: fileEntries.length,
+      fileOperations: sortedOperations.length,
+      fileProcessed,
+      totalOperations: operations.length,
+      processedOperations,
+      elapsedMs: Date.now() - startedAt
+    });
     const vanillaPath = path.join(gamePath, "Data", "Config", file);
     if (!(await pathExists(vanillaPath))) {
-      for (const operation of sortOperations(fileOperations)) {
+      for (const operation of sortedOperations) {
         const item = baseTrace(operation, "missed", 0, [], [{ kind: "miss", target: operation.xpath, summary: "vanilla file missing" }], "xpath-miss", "low");
         item.message = `Vanilla XML file was not found: ${file}`;
         trace.push(item);
       }
+      processedOperations += sortedOperations.length;
+      fileProcessed = sortedOperations.length;
+      profileFile.replayed = sortedOperations.length;
+      profileFile.elapsedMs = Date.now() - fileStartedAt;
       warnings.push({ kind: "trace-missing-vanilla", message: `Vanilla XML file was not found: ${file}`, path: file });
+      emitProgress(options, {
+        phase: "file-skipped",
+        file,
+        fileIndex: fileIndex + 1,
+        fileCount: fileEntries.length,
+        fileOperations: sortedOperations.length,
+        fileProcessed,
+        totalOperations: operations.length,
+        processedOperations,
+        elapsedMs: Date.now() - startedAt,
+        message: `Vanilla XML file was not found: ${file}`
+      });
       continue;
     }
 
@@ -72,46 +169,128 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
       document = parseXml(await readFile(vanillaPath, "utf8"));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      for (const operation of sortOperations(fileOperations)) {
+      for (const operation of sortedOperations) {
         const item = baseTrace(operation, "parseError", 0, [], [{ kind: "parseError", target: operation.xpath, summary: message }], "parse-error", "low");
         item.message = message;
         trace.push(item);
       }
+      processedOperations += sortedOperations.length;
+      fileProcessed = sortedOperations.length;
+      profileFile.replayed = sortedOperations.length;
+      profileFile.elapsedMs = Date.now() - fileStartedAt;
       warnings.push({ kind: "trace-parse-error", message: `Could not parse vanilla XML ${file}: ${message}`, path: file });
+      emitProgress(options, {
+        phase: "file-skipped",
+        file,
+        fileIndex: fileIndex + 1,
+        fileCount: fileEntries.length,
+        fileOperations: sortedOperations.length,
+        fileProcessed,
+        totalOperations: operations.length,
+        processedOperations,
+        elapsedMs: Date.now() - startedAt,
+        message: `Could not parse vanilla XML ${file}: ${message}`
+      });
       continue;
     }
 
     const provenance = new ReplayProvenance();
     const futureAdds = collectFutureAdds(fileOperations);
-    const sortedOperations = sortOperations(fileOperations);
     const replayIndex = new XmlReplayIndex(document);
+    let fileCompleteEmitted = false;
     for (const [operationIndex, operation] of sortedOperations.entries()) {
       if (budgetExpired(fileStartedAt, timeoutMs)) {
-        pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(operationIndex), fileIndex + 1, fileEntries.length, Date.now() - fileStartedAt);
+        const remaining = sortedOperations.slice(operationIndex);
+        pushBudgetSkipped(trace, warnings, file, remaining, fileIndex + 1, fileEntries.length, Date.now() - fileStartedAt);
+        profileFile.partial += remaining.length;
+        processedOperations += remaining.length;
+        fileProcessed += remaining.length;
+        emitProgress(options, {
+          phase: "file-complete",
+          file,
+          fileIndex: fileIndex + 1,
+          fileCount: fileEntries.length,
+          fileOperations: sortedOperations.length,
+          fileProcessed,
+          totalOperations: operations.length,
+          processedOperations,
+          elapsedMs: Date.now() - startedAt,
+          message: `Budget exceeded; ${remaining.length} operation(s) left as partial diagnostics`
+        });
+        fileCompleteEmitted = true;
         break;
       }
-      const item = replayOperation(document, operation, provenance, futureAdds, replayIndex, options.mode ?? "fast");
+      const item = replayOperation(document, operation, provenance, futureAdds, replayIndex, options.mode ?? "fast", metrics);
       trace.push(item);
-      let indexDirty = false;
-      for (const effect of item.effects) {
-        if (effectMayAffectIndex(effect)) {
-          indexDirty = true;
-        }
-      }
-      if (indexDirty) {
-        replayIndex.markDirty();
-      }
+      profileFile.replayed += 1;
+      processedOperations += 1;
+      fileProcessed += 1;
+      emitProgress(options, {
+        phase: "operation",
+        file,
+        fileIndex: fileIndex + 1,
+        fileCount: fileEntries.length,
+        fileOperations: sortedOperations.length,
+        fileProcessed,
+        totalOperations: operations.length,
+        processedOperations,
+        elapsedMs: Date.now() - startedAt
+      });
       if (item.diagnosticKind !== "ok") {
         warnings.push({ kind: `trace-${item.diagnosticKind}`, message: item.message ?? `${operation.operation} ${operation.xpath}: ${item.diagnosticKind}`, modName: operation.modName, path: operation.file });
       }
     }
+    profileFile.indexRebuilds = replayIndex.rebuilds;
+    profileFile.indexUpdates = replayIndex.updates;
+    profileFile.elapsedMs = Date.now() - fileStartedAt;
+    if (!fileCompleteEmitted && fileProcessed === sortedOperations.length) {
+      emitProgress(options, {
+        phase: "file-complete",
+        file,
+        fileIndex: fileIndex + 1,
+        fileCount: fileEntries.length,
+        fileOperations: sortedOperations.length,
+        fileProcessed,
+        totalOperations: operations.length,
+        processedOperations,
+        elapsedMs: Date.now() - startedAt
+      });
+    }
   }
 
+  emitProgress(options, {
+    phase: "done",
+    totalOperations: operations.length,
+    processedOperations,
+    elapsedMs: Date.now() - startedAt
+  });
+  const elapsedMs = Date.now() - startedAt;
+  if (options.traceProfilePath) {
+    await writeTraceProfile(options.traceProfilePath, {
+      generatedAt: new Date().toISOString(),
+      mode: options.mode ?? "fast",
+      timeoutMs,
+      operations: operations.length,
+      replayed: profileFiles.reduce((sum, file) => sum + file.replayed, 0),
+      partial: profileFiles.reduce((sum, file) => sum + file.partial, 0),
+      elapsedMs,
+      files: profileFiles
+    });
+  }
   return { trace, warnings };
+}
+
+function emitProgress(options: TraceOptions, progress: PatchTraceProgress): void {
+  options.onProgress?.(progress);
 }
 
 function budgetExpired(startedAt: number, timeoutMs: number): boolean {
   return Date.now() - startedAt > timeoutMs;
+}
+
+async function writeTraceProfile(filePath: string, profile: PatchTraceProfile): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(profile, null, 2)}\n`, "utf8");
 }
 
 function pushBudgetSkipped(trace: PatchTrace[], warnings: ScanWarning[], file: string, operations: XmlPatchOperation[], fileIndex: number, fileCount: number, elapsedMs: number): void {
@@ -201,7 +380,8 @@ function replayOperation(
   provenance: ReplayProvenance,
   futureAdds: Set<string>,
   index: XmlReplayIndex,
-  mode: TraceOptions["mode"]
+  mode: TraceOptions["mode"],
+  metrics: ReplayMetrics
 ): PatchTrace {
   if (operation.operation === "parse-error") {
     return baseTrace(operation, "parseError", 0, [], [{ kind: "parseError", target: operation.path, summary: "patch XML parse error" }], "parse-error", "low");
@@ -212,7 +392,7 @@ function replayOperation(
 
   let selected: DomNode[];
   try {
-    selected = selectNodes(document, operation.xpath, index, mode ?? "fast");
+    selected = selectNodes(document, operation.xpath, index, mode ?? "fast", metrics);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return baseTrace(operation, "unsupported", 0, [], [{ kind: "unsupported", target: operation.xpath, summary: message }], "unsupported-operation", "low", message);
@@ -244,17 +424,17 @@ function replayOperation(
     const target = targetFor(node, operation.xpath);
     let applied: AppliedPatchEffect;
     if (op === "set") {
-      applied = applySet(node, target, operation, provenance);
+      applied = applySet(node, target, operation, provenance, index);
     } else if (op === "setattribute") {
-      applied = applySetAttribute(node, target, operation, provenance);
+      applied = applySetAttribute(node, target, operation, provenance, index);
     } else if (op === "removeattribute") {
-      applied = applyRemoveAttribute(node, target, operation, provenance);
+      applied = applyRemoveAttribute(node, target, operation, provenance, index);
     } else if (op === "append") {
-      applied = applyAppend(node, target, operation, fragmentTemplates ?? [], provenance);
+      applied = applyAppend(node, target, operation, fragmentTemplates ?? [], provenance, index);
     } else if (op === "remove") {
-      applied = applyRemove(node, target, provenance);
+      applied = applyRemove(node, target, provenance, index);
     } else if (op === "insertbefore" || op === "insertafter") {
-      applied = applyInsert(node, target, operation, op === "insertbefore", fragmentTemplates ?? [], provenance);
+      applied = applyInsert(node, target, operation, op === "insertbefore", fragmentTemplates ?? [], provenance, index);
     } else {
       applied = { effect: { kind: "unsupported", target: target.canonical, summary: `${operation.operation} replay is not implemented` } };
     }
@@ -277,11 +457,12 @@ function replayOperation(
   return baseTrace(operation, status, matchCount, targets, effects, diagnosticKind, matchCount > 1 ? "medium" : "high", message);
 }
 
-function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
+function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   const value = operation.valueText ?? "";
   if (node.nodeType === 2) {
     const before = node.value ?? "";
     node.value = value;
+    index.updateKeyAttribute(node.ownerElement ?? node, node.name, before, value);
     return {
       effect: {
         kind: "setAttribute",
@@ -311,12 +492,13 @@ function applySet(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOp
   };
 }
 
-function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
+function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   const attr = operation.attributes?.name ?? operation.attributes?.attribute ?? attributeNameFromXpath(operation.xpath) ?? "value";
   const value = operation.attributes?.value ?? operation.valueText ?? "";
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.setAttribute(attr, value);
+  index.updateKeyAttribute(element, attr, before, value);
   const slotKey = provenance.attrSlot(element, attr);
   return {
     effect: {
@@ -332,11 +514,12 @@ function applySetAttribute(node: DomNode, target: PatchTraceTarget, operation: X
   };
 }
 
-function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance): AppliedPatchEffect {
+function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   const attr = operation.attributes?.name ?? operation.attributes?.attribute ?? attributeNameFromXpath(operation.xpath) ?? "value";
   const element = node.nodeType === 2 ? node.ownerElement : node;
   const before = element.getAttribute(attr) ?? undefined;
   element.removeAttribute(attr);
+  index.updateKeyAttribute(element, attr, before, undefined);
   const slotKey = provenance.attrSlot(element, attr);
   return {
     effect: {
@@ -351,11 +534,12 @@ function applyRemoveAttribute(node: DomNode, target: PatchTraceTarget, operation
   };
 }
 
-function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, templates: DomNode[], provenance: ReplayProvenance): AppliedPatchEffect {
+function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, templates: DomNode[], provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   if (node.nodeType === 2) {
     const before = node.value ?? "";
     const after = `${before}${operation.valueText ?? ""}`;
     node.value = after;
+    index.updateKeyAttribute(node.ownerElement ?? node, node.name, before, after);
     const slotKey = provenance.attrSlot(node, node.name);
     return {
       effect: {
@@ -373,6 +557,7 @@ function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatc
   const nodes = cloneFragmentNodes(templates);
   for (const child of nodes) {
     node.appendChild(child);
+    index.addSubtree(child);
   }
   const childSlot = provenance.childSlot(node);
   const insertedNodeIds = nodes.map((child) => provenance.nodeId(child));
@@ -390,13 +575,15 @@ function applyAppend(node: DomNode, target: PatchTraceTarget, operation: XmlPatc
   };
 }
 
-function applyRemove(node: DomNode, target: PatchTraceTarget, provenance: ReplayProvenance): AppliedPatchEffect {
+function applyRemove(node: DomNode, target: PatchTraceTarget, provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   const before = node.nodeType === 2 ? node.value : serializer.serializeToString(node);
   const removedNode = node.nodeType === 2 ? node.ownerElement ?? node : node;
   const removed = { nodeId: provenance.nodeId(removedNode), canonicalTarget: target.canonical };
   if (node.nodeType === 2) {
+    index.updateKeyAttribute(node.ownerElement ?? node, node.name, node.value ?? undefined, undefined);
     node.ownerElement?.removeAttribute(node.name);
   } else {
+    index.removeSubtree(node);
     node.parentNode?.removeChild(node);
   }
   return {
@@ -412,7 +599,7 @@ function applyRemove(node: DomNode, target: PatchTraceTarget, provenance: Replay
   };
 }
 
-function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean, templates: DomNode[], provenance: ReplayProvenance): AppliedPatchEffect {
+function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatchOperation, before: boolean, templates: DomNode[], provenance: ReplayProvenance, index: XmlReplayIndex): AppliedPatchEffect {
   const nodes = cloneFragmentNodes(templates);
   const parent = node.parentNode;
   if (!parent) {
@@ -420,6 +607,7 @@ function applyInsert(node: DomNode, target: PatchTraceTarget, operation: XmlPatc
   }
   for (const child of nodes) {
     parent.insertBefore(child, before ? node : node.nextSibling);
+    index.addSubtree(child);
   }
   const childSlot = provenance.childSlot(parent);
   const insertedNodeIds = nodes.map((child) => provenance.nodeId(child));
@@ -480,11 +668,15 @@ function parseXml(text: string): XmlDocument {
   return document;
 }
 
-function selectNodes(document: XmlDocument, expression: string, index: XmlReplayIndex, mode: TraceOptions["mode"]): DomNode[] {
+function selectNodes(document: XmlDocument, expression: string, index: XmlReplayIndex, mode: TraceOptions["mode"], metrics: ReplayMetrics): DomNode[] {
   if (mode !== "exact") {
     const fast = selectSimpleXPath(document, expression, index);
-    if (fast) return fast;
+    if (fast) {
+      metrics.profile.xpathFastPath += 1;
+      return fast;
+    }
   }
+  metrics.profile.xpathFallback += 1;
   const result = xpath.select(expression, document as any);
   return Array.isArray(result) ? result as DomNode[] : [];
 }
@@ -493,11 +685,38 @@ class XmlReplayIndex {
   private dirty = true;
   private byTag = new Map<string, DomNode[]>();
   private byTagKey = new Map<string, DomNode[]>();
+  rebuilds = 0;
+  updates = 0;
 
   constructor(private readonly document: XmlDocument) {}
 
   markDirty(): void {
     this.dirty = true;
+  }
+
+  addSubtree(node: DomNode): void {
+    const wasDirty = this.dirty;
+    this.ensureFresh();
+    if (wasDirty) {
+      this.updates += 1;
+      return;
+    }
+    this.walk(node);
+    this.updates += 1;
+  }
+
+  removeSubtree(node: DomNode): void {
+    this.ensureFresh();
+    this.unwalk(node);
+    this.updates += 1;
+  }
+
+  updateKeyAttribute(node: DomNode, attr: string, before: string | undefined, after: string | undefined): void {
+    if (!keyAttributes.includes(attr) || before === after || node?.nodeType !== 1) return;
+    this.ensureFresh();
+    if (before) removeMapValue(this.byTagKey, indexKey(node.tagName, attr, before), node);
+    if (after) pushMap(this.byTagKey, indexKey(node.tagName, attr, after), node);
+    this.updates += 1;
   }
 
   descendants(tag: string, keyAttr?: string, keyValue?: string): DomNode[] {
@@ -530,6 +749,7 @@ class XmlReplayIndex {
     const root = this.document.documentElement;
     if (root) this.walk(root);
     this.dirty = false;
+    this.rebuilds += 1;
   }
 
   private walk(node: DomNode): void {
@@ -541,6 +761,17 @@ class XmlReplayIndex {
     }
     const children = this.children(node);
     for (const child of children) this.walk(child);
+  }
+
+  private unwalk(node: DomNode): void {
+    if (node.nodeType !== 1) return;
+    removeMapValue(this.byTag, node.tagName, node);
+    for (const attr of keyAttributes) {
+      const value = node.getAttribute?.(attr);
+      if (value) removeMapValue(this.byTagKey, indexKey(node.tagName, attr, value), node);
+    }
+    const children = this.children(node);
+    for (const child of children) this.unwalk(child);
   }
 }
 
@@ -641,6 +872,14 @@ function selectAbsoluteSimple(document: XmlDocument, parsed: SimpleXPath, index:
 }
 
 function parseSimpleXPath(expression: string): SimpleXPath | undefined {
+  const cached = simpleXPathCache.get(expression);
+  if (cached !== undefined || simpleXPathCache.has(expression)) return cached;
+  const parsed = parseSimpleXPathUncached(expression);
+  simpleXPathCache.set(expression, parsed);
+  return parsed;
+}
+
+function parseSimpleXPathUncached(expression: string): SimpleXPath | undefined {
   const normalized = canonicalFromXpath(expression);
   if (/[|*]|\b(?:text|position|last)\b/.test(normalized)) return undefined;
   const attributeMatch = /\/@([\w.-]+)$/.exec(normalized);
@@ -783,6 +1022,17 @@ function pushMap<K, V>(map: Map<K, V[]>, key: K, value: V): void {
     return;
   }
   map.set(key, [value]);
+}
+
+function removeMapValue<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const current = map.get(key);
+  if (!current) return;
+  const next = current.filter((item) => item !== value);
+  if (next.length === 0) {
+    map.delete(key);
+    return;
+  }
+  map.set(key, next);
 }
 
 function indexKey(tag: string, attr: string, value: string): string {

@@ -240,6 +240,8 @@ export function buildUiModel(pack: ContextPack, source: UiModel["source"] = "con
 interface ReviewRow {
   file: string;
   xpath: string;
+  searchText?: string;
+  isSummary?: boolean;
   exact?: boolean;
   proof?: ContextPack["diagnosticGroups"][number]["proof"];
   sourceLabel?: string;
@@ -257,11 +259,12 @@ interface ReviewRow {
 }
 
 function buildConflictGroupRows(groups: ContextPack["diagnosticGroups"], operationsById: ContextPack["operationsById"], traceIndex: Map<string, PatchTrace>): ReviewRow[] {
-  return groups.flatMap((group) => {
+  const detailRows = groups.flatMap((group) => {
     if (!isReviewableConflictGroup(group, traceIndex)) return [];
     const operations = group.operationIds.map((opId) => operationsById[opId]).filter((operation): operation is ContextPack["scan"]["xmlPatches"][number] => Boolean(operation)).sort(compareOperation);
     const evidence = operations.map((operation) => operationEvidence(operation, traceIndex));
     const traces = evidence.map((item) => item.trace).filter((item): item is PatchTrace => Boolean(item));
+    const historyOperations = operations.filter((operation) => traceIndex.get(operationKey(operation))?.status !== "partial");
     const category = categoryForGroup(operations, traces);
     const kind = group.kind ?? worstKind(traces.length > 0 ? traces : operations.map(operationToPseudoTrace));
     const winner = operationsById[group.primaryOpId] ?? operations[operations.length - 1];
@@ -276,18 +279,95 @@ function buildConflictGroupRows(groups: ContextPack["diagnosticGroups"], operati
       proof: group.proof,
       sourceLabel: sourceLabelForProof(group.proof, traces),
       operations,
-      evidence: evidence.map(({ trace: _trace, ...item }) => item),
+      evidence: aggregatePartialEvidence(evidence.map(({ trace: _trace, ...item }) => item)),
       category,
       kind,
       risk,
       final,
       finalKind,
       vanilla: firstVanillaValue(traces),
-      history: operations.map((operation) => operationToHistory(operation, traceIndex)),
+      history: (historyOperations.length > 0 ? historyOperations : operations.filter((operation) => !traceIndex.has(operationKey(operation)))).map((operation) => operationToHistory(operation, traceIndex)),
       winner: winner.modName,
       note: explainConflictGroup(group, traces, category)
     }];
   }).sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
+  return [...buildItemSummaryRows(detailRows), ...detailRows];
+}
+
+function buildItemSummaryRows(rows: ReviewRow[]): ReviewRow[] {
+  const candidates = rows.filter((row) => row.file === "items.xml").map((row) => {
+    const itemName = itemNameForTarget(row.xpath);
+    if (!itemName) return undefined;
+    return { row, itemName, itemCategory: itemCategoryForName(itemName), changeKind: changeKindForTarget(row.xpath) };
+  }).filter((item): item is { row: ReviewRow; itemName: string; itemCategory: string; changeKind: string } => Boolean(item));
+  const summaries: ReviewRow[] = [];
+  for (const [key, entries] of groupBy(candidates, (item) => `${item.row.file}\0${item.itemCategory}\0${item.changeKind}`).entries()) {
+    if (entries.length < 2) continue;
+    const [file, itemCategory, changeKind] = key.split("\0");
+    const memberRows = entries.map((entry) => entry.row);
+    const operations = memberRows.flatMap((row) => row.operations ?? []);
+    const risk = highestRisk(memberRows.map((row) => row.risk));
+    const category = summarizeCategory(memberRows.map((row) => row.category));
+    const kind = highestRiskKind(memberRows.map((row) => row.kind));
+    const modCounts = countByValues(operations.map((operation) => operation.modName));
+    const targetCounts = countByValues(entries.map((entry) => entry.itemName));
+    const topMods = topCounts(modCounts, 5);
+    const topTargets = topCounts(targetCounts, 8);
+    const groupCount = memberRows.length;
+    const operationCount = operations.length;
+    summaries.push({
+      file,
+      xpath: `${itemCategory} / ${changeKind}`,
+      searchText: [itemCategory, changeKind, ...memberRows.map((row) => row.xpath), ...topMods.map((item) => item.name), ...topTargets.map((item) => item.name)].join(" "),
+      isSummary: true,
+      exact: memberRows.every((row) => row.exact !== false),
+      proof: memberRows.some((row) => row.proof === "partial") ? "partial" : memberRows.every((row) => row.proof === "exact") ? "exact" : "fallback",
+      sourceLabel: "UI summary from diagnostic groups",
+      operations,
+      evidence: [{
+        operationKey: `summary\0${file}\0${itemCategory}\0${changeKind}`,
+        status: undefined,
+        diagnosticKind: kind,
+        confidence: "low",
+        message: `${groupCount} groups / ${operationCount} operations. Top mods: ${formatCounts(topMods)}. Top targets: ${formatCounts(topTargets)}.`,
+        effects: [],
+        affectedTargets: []
+      }],
+      category,
+      kind,
+      risk,
+      final: `${groupCount} groups / ${operationCount} operations`,
+      finalKind: "status",
+      vanilla: null,
+      history: topMods.map((item, index) => ({
+        mod: item.name,
+        order: index + 1,
+        op: "summary",
+        value: `${item.count} operations`,
+        authored: `${groupCount} groups total`
+      })),
+      winner: topMods[0]?.name,
+      note: `Summary only. Individual diagnostic groups remain below. Top targets: ${formatCounts(topTargets)}.`
+    });
+  }
+  return summaries.sort((a, b) => riskRank(b.risk) - riskRank(a.risk) || a.file.localeCompare(b.file) || a.xpath.localeCompare(b.xpath));
+}
+
+function aggregatePartialEvidence(evidence: UiConflictEvidence[]): UiConflictEvidence[] {
+  const partial = evidence.filter((item) => item.status === "partial");
+  if (partial.length === 0) return evidence;
+  return [
+    ...evidence.filter((item) => item.status !== "partial"),
+    {
+      operationKey: `budget-partial\0${partial.length}`,
+      status: "partial",
+      diagnosticKind: "unsupported-operation",
+      confidence: "low",
+      message: `Budget partial: ${partial.length} operations`,
+      effects: [],
+      affectedTargets: []
+    }
+  ];
 }
 
 function isReviewableConflictGroup(group: ContextPack["diagnosticGroups"][number], _traceIndex: Map<string, PatchTrace>): boolean {
@@ -525,11 +605,12 @@ function explainTraceGroup(items: PatchTrace[]): string {
 
 function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
   const byFile = new Map<string, UiNode[]>();
-  rows.slice(0, 160).forEach((row, index) => {
+  rows.forEach((row, index) => {
     const attr: UiAttr = {
       conflictId: `c${index + 1}`,
-      name: targetName(row.xpath),
+      name: row.isSummary ? row.xpath : targetName(row.xpath),
       target: row.xpath,
+      searchText: row.searchText,
       category: row.category,
       finalKind: row.finalKind,
       vanilla: row.vanilla,
@@ -545,8 +626,8 @@ function buildTree(rows: ReviewRow[]): UiModel["xmlTree"] {
       xpath: row.xpath,
       note: row.note
     };
-    const nodePath = parentPath(row.xpath);
-    const node = { path: nodePath, label: `<${nodePath || row.xpath}>`, risk: attr.risk, attrs: [attr] };
+    const nodePath = row.isSummary ? `Summary / ${row.file}` : parentPath(row.xpath);
+    const node = { path: nodePath, label: row.isSummary ? "Summaries" : `<${nodePath || row.xpath}>`, risk: attr.risk, attrs: [attr] };
     const list = byFile.get(row.file) ?? [];
     list.push(node);
     byFile.set(row.file, list);
@@ -573,6 +654,17 @@ function riskForDiagnostics(traces: PatchTrace[]): Risk {
 
 function highestRisk(risks: Risk[]): Risk {
   return risks.sort((a, b) => riskRank(b) - riskRank(a))[0] ?? "safe";
+}
+
+function highestRiskKind(kinds: ConflictKind[]): ConflictKind {
+  return kinds.sort((a, b) => riskRank(conflictKinds[b].risk) - riskRank(conflictKinds[a].risk))[0] ?? "unknown-risk";
+}
+
+function summarizeCategory(categories: ConflictCategory[]): ConflictCategory {
+  const unique = new Set(categories);
+  if (unique.has("mixed") || (unique.has("value") && unique.has("structural"))) return "mixed";
+  if (unique.has("structural")) return "structural";
+  return "value";
 }
 
 function riskRank(risk: Risk): number {
@@ -606,6 +698,48 @@ function targetName(xpath: string): string {
 function parentPath(xpath: string): string {
   const parts = xpath.split("/").filter(Boolean);
   return parts.slice(Math.max(0, parts.length - 2)).join("/") || xpath;
+}
+
+function itemNameForTarget(target: string): string | undefined {
+  return target.match(/\/items\/item\[@name=['"]([^'"]+)['"]\]/)?.[1];
+}
+
+function itemCategoryForName(name: string): string {
+  if (/^ammo(?:Eft)?/i.test(name)) return "Ammo";
+  if (/^gunbow/i.test(name)) return "Bow";
+  if (/^gun/i.test(name)) return "Gun";
+  if (/^(?:armor|modArmor)/i.test(name)) return "Armor";
+  if (/^(?:melee|tool)/i.test(name)) return "Tool/Melee";
+  return "Item";
+}
+
+function changeKindForTarget(target: string): string {
+  const passive = target.match(/\/passive_effect\[@name=['"]([^'"]+)['"]\]/);
+  if (passive) return `Passive effect: ${passive[1]}`;
+  if (/\/property\[@name=['"]EconomicValue['"]\]\/@value$/.test(target)) return "EconomicValue";
+  if (/\/effect_group(?:\/|$)/.test(target)) return "Effect group";
+  const attr = target.match(/\/@([\w.-]+)$/);
+  if (attr) return attr[1];
+  const named = target.match(/\/([\w.-]+)\[@name=['"]([^'"]+)['"]\](?:$|\/)/);
+  if (named) return `${named[1]}: ${named[2]}`;
+  return targetName(target).replace(/\[[^\]]+\]/g, "");
+}
+
+function countByValues(values: string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  return counts;
+}
+
+function topCounts(counts: Map<string, number>, limit: number): { name: string; count: number }[] {
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+function formatCounts(items: { name: string; count: number }[]): string {
+  return items.length > 0 ? items.map((item) => `${item.name} (${item.count})`).join(", ") : "none";
 }
 
 function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { buildPatchTrace } from "./patchTrace.js";
 import { XmlPatchOperation } from "./types.js";
@@ -173,6 +173,49 @@ test("append updates fast-path targets for later XPath lookups", async () => {
     assert.equal(trace[1].effects[0].target, "/items/item[@name='future']/@value");
     assert.equal(trace[1].effects[0].before, "1");
     assert.equal(trace[1].effects[0].after, "2");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("key attribute updates refresh fast-path key lookups", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="old" value="1"/></items>`);
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='old']", "setattribute", "new", "text", "new", { name: "name", value: "new" }),
+      op("B", 2, "items.xml", "/items/item[@name='old']/@value", "set", "stale"),
+      op("C", 3, "items.xml", "/items/item[@name='new']/@value", "set", "2")
+    ], fixture.gamePath, { mode: "fast" });
+
+    assert.equal(trace[0].status, "applied");
+    assert.equal(trace[1].status, "missed");
+    assert.equal(trace[2].status, "applied");
+    assert.equal(trace[2].effects[0].target, "/items/item[@name='new']/@value");
+    assert.equal(trace[2].effects[0].before, "1");
+    assert.equal(trace[2].effects[0].after, "2");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("trace profile records XPath fast path and incremental index updates", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items></items>`);
+  const profilePath = path.join(fixture.gamePath, "profile.json");
+  try {
+    const { trace } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items", "append", `<item name="future" value="1"/>`, "xml", "<item future>"),
+      op("B", 2, "items.xml", "/items/item[@name='future']/@value", "set", "2"),
+      op("C", 3, "items.xml", "/items/item[@name='future']/@value", "set", "3")
+    ], fixture.gamePath, { mode: "fast", traceProfilePath: profilePath });
+
+    const profile = JSON.parse(await readFile(profilePath, "utf8"));
+    assert.equal(trace.length, 3);
+    assert.equal(profile.operations, 3);
+    assert.equal(profile.files[0].file, "items.xml");
+    assert.equal(profile.files[0].xpathFastPath, 3);
+    assert.equal(profile.files[0].xpathFallback, 0);
+    assert.equal(profile.files[0].indexUpdates >= 1, true);
+    assert.equal(profile.files[0].indexRebuilds, 1);
   } finally {
     await fixture.cleanup();
   }

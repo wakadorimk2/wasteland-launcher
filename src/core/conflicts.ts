@@ -131,10 +131,19 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
 
   const removes = effects.filter((item) => item.effect.kind === "removeNode");
   for (const remove of removes) {
+    const anchoredInsertReaders = effects
+      .filter((item) =>
+        item.operation.file === remove.operation.file
+        && item.operation !== remove.operation
+        && (item.effect.kind === "insertBefore" || item.effect.kind === "insertAfter")
+        && targetContains(remove.effect.target, item.effect.target)
+      );
     const operationsForRemovedSubtree = effects
       .filter((item) =>
         item.operation.file === remove.operation.file
         && item.operation !== remove.operation
+        && item.effect.kind !== "insertBefore"
+        && item.effect.kind !== "insertAfter"
         && targetContains(remove.effect.target, item.effect.target)
         && (scalarEffectKinds.has(item.effect.kind) || structuralEffectKinds.has(item.effect.kind))
       )
@@ -153,6 +162,22 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
       confidence: "proven",
       orderDependent: true
     }));
+    if (anchoredInsertReaders.length > 0) {
+      pending.push(pendingGroup({
+        file: remove.operation.file,
+        target: remove.effect.target,
+        targetKey: `anchor:${effectTargetKey(remove.effect)}`,
+        operations: [remove.operation, ...anchoredInsertReaders.map((item) => item.operation)],
+        traces: [remove.trace, ...anchoredInsertReaders.map((item) => item.trace)],
+        effects: [remove.effect, ...anchoredInsertReaders.map((item) => item.effect)],
+        exact: true,
+        source: "replay",
+        classification: "sibling-order-dependent",
+        kind: "sibling-order-dependent",
+        confidence: "proven",
+        orderDependent: true
+      }));
+    }
   }
 
   const missed = trace.filter((item) => item.status === "missed");
@@ -164,6 +189,8 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
       const removers = removes
         .filter((item) => item.operation.file === miss.file && item.operation.order < miss.order && targetContains(item.effect.target, missTarget))
         .map((item) => item.operation);
+      const missedOpName = missedOperation.operation.toLowerCase();
+      const anchorInsertMiss = missedOpName === "insertbefore" || missedOpName === "insertafter";
       pending.push(pendingGroup({
         file: miss.file,
         target: missTarget,
@@ -173,8 +200,8 @@ function detectReplayConflicts(trace: PatchTrace[], operationByTraceId: Map<stri
         effects: miss.effects,
         exact: true,
         source: "replay",
-        classification: "order-induced-miss",
-        kind: "order-induced-miss",
+        classification: anchorInsertMiss ? "sibling-order-dependent" : "order-induced-miss",
+        kind: anchorInsertMiss ? "sibling-order-dependent" : "order-induced-miss",
         confidence: "proven",
         orderDependent: true
       }));
@@ -238,13 +265,20 @@ function detectFootprintConflicts(operations: XmlPatchOperation[]): PendingGroup
   for (const remover of footprints) {
     for (const removed of remover.removedNodeSelectors) {
       const operationsForTarget: XmlPatchOperation[] = [remover.operation];
+      const anchoredInsertReaders: XmlPatchOperation[] = [remover.operation];
       for (const writer of footprints) {
         if (writer.operation === remover.operation || writer.file !== remover.file) continue;
         if (writer.writtenScalarSlots.some((slot) => normalizedContains(removed.normalizedXpath, slot.normalizedXpath))) {
           operationsForTarget.push(writer.operation);
         }
-        if (writer.insertedChildSlots.some((slot) => normalizedContains(removed.normalizedXpath, slot.normalizedXpath) || normalizedContains(slot.normalizedXpath, removed.normalizedXpath))) {
+        if (writer.insertedChildSlots.some((slot) => normalizedContains(removed.normalizedXpath, slot.normalizedXpath))) {
           operationsForTarget.push(writer.operation);
+        }
+        if (
+          (writer.operationName === "insertbefore" || writer.operationName === "insertafter")
+          && writer.reads.some((read) => normalizedContains(removed.normalizedXpath, read.normalizedXpath))
+        ) {
+          anchoredInsertReaders.push(writer.operation);
         }
       }
       pending.push(pendingGroup({
@@ -261,6 +295,22 @@ function detectFootprintConflicts(operations: XmlPatchOperation[]): PendingGroup
         confidence: "likely",
         orderDependent: true
       }));
+      if (anchoredInsertReaders.length > 1) {
+        pending.push(pendingGroup({
+          file: remover.file,
+          target: removed.normalizedXpath,
+          targetKey: `footprint-anchor:${remover.file}:${removed.normalizedXpath}`,
+          operations: anchoredInsertReaders,
+          traces: [],
+          effects: [],
+          exact: false,
+          source: "footprint",
+          classification: "sibling-order-dependent",
+          kind: "sibling-order-dependent",
+          confidence: "likely",
+          orderDependent: true
+        }));
+      }
     }
   }
 
