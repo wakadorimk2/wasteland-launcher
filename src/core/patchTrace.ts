@@ -51,15 +51,11 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
   const trace: PatchTrace[] = [];
   const warnings: ScanWarning[] = [];
   const byFile = groupBy(operations, (operation) => operation.file);
-  const startedAt = Date.now();
   const timeoutMs = options.timeoutMs ?? 8_000;
   const fileEntries = Array.from(byFile.entries());
 
   for (const [fileIndex, [file, fileOperations]] of fileEntries.entries()) {
-    if (budgetExpired(startedAt, timeoutMs)) {
-      pushBudgetSkipped(trace, warnings, file, sortOperations(fileOperations), fileIndex + 1, fileEntries.length, Date.now() - startedAt);
-      continue;
-    }
+    const fileStartedAt = Date.now();
     const vanillaPath = path.join(gamePath, "Data", "Config", file);
     if (!(await pathExists(vanillaPath))) {
       for (const operation of sortOperations(fileOperations)) {
@@ -90,8 +86,8 @@ export async function buildPatchTrace(operations: XmlPatchOperation[], gamePath 
     const sortedOperations = sortOperations(fileOperations);
     const replayIndex = new XmlReplayIndex(document);
     for (const [operationIndex, operation] of sortedOperations.entries()) {
-      if (budgetExpired(startedAt, timeoutMs)) {
-        pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(operationIndex), fileIndex + 1, fileEntries.length, Date.now() - startedAt);
+      if (budgetExpired(fileStartedAt, timeoutMs)) {
+        pushBudgetSkipped(trace, warnings, file, sortedOperations.slice(operationIndex), fileIndex + 1, fileEntries.length, Date.now() - fileStartedAt);
         break;
       }
       const item = replayOperation(document, operation, provenance, futureAdds, replayIndex, options.mode ?? "fast");

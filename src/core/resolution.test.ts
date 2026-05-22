@@ -263,6 +263,24 @@ test("reference to a later appended target becomes dependency-order-miss", async
   }
 });
 
+test("replay budget is applied per file so one heavy file does not starve another", async () => {
+  const fixture = await makeGameFixture("items.xml", `<items><item name="coin" value="1"/></items>`);
+  await writeFile(path.join(fixture.gamePath, "Data", "Config", "blocks.xml"), `<blocks><block name="stone" value="1"/></blocks>`, "utf8");
+  try {
+    const { trace, warnings } = await buildPatchTrace([
+      op("A", 1, "items.xml", "/items/item[@name='coin']/@value", "set", "2"),
+      op("B", 2, "blocks.xml", "/blocks/block[@name='stone']/@value", "set", "3")
+    ], fixture.gamePath, { timeoutMs: -1 });
+
+    assert.equal(trace.length, 2);
+    assert.deepEqual(trace.map((item) => item.file).sort(), ["blocks.xml", "items.xml"]);
+    assert.equal(trace.every((item) => item.status === "partial"), true);
+    assert.equal(warnings.filter((warning) => warning.kind === "trace-budget-exceeded").length, 2);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("broad XPath matches and csv operations remain diagnostic traces", async () => {
   const fixture = await makeGameFixture("items.xml", `<items><item name="a"/><item name="b"/></items>`);
   try {

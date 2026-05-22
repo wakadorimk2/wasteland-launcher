@@ -81,34 +81,39 @@ export interface PatchTrace {
   message?: string;
 }
 
-export interface ConflictGroup {
-  id?: string;
+export interface DiagnosticGroup {
+  id: string;
   file: string;
-  kind?: ConflictKind;
-  classification?: string;
-  risk?: Risk;
-  confidence?: "proven" | "likely" | "unknown";
-  targetKey?: string;
+  kind: ConflictKind;
+  classification: string;
+  risk: Risk;
+  confidence: "proven" | "likely" | "unknown";
+  proof: "exact" | "footprint" | "fallback" | "partial";
+  targetKey: string;
   displayTarget?: string;
-  operationIds?: string[];
+  operationIds: string[];
   normalizedXpath: string;
-  operations: XmlPatchOperation[];
-  primaryOpId?: string;
-  relatedOpIds?: string[];
-  evidence?: {
+  primaryOpId: string;
+  relatedOpIds: string[];
+  source: "replay" | "footprint" | "normalized" | "budget";
+  orderDependent: boolean;
+}
+
+export interface ReplayEvidence {
+  groupId: string;
+  proof: DiagnosticGroup["proof"];
+  evidence: {
     opId: string;
     effects: PatchTraceEffect[];
     matchEvents: unknown[];
     slotVersions: unknown[];
     note?: string;
   }[];
-  source?: "replay" | "footprint" | "normalized";
-  orderDependent?: boolean;
-  winner?: XmlPatchOperation;
-  exact: boolean;
+  traceIds: string[];
 }
 
 export interface ContextPack {
+  schemaVersion: 3;
   generatedAt: string;
   scan: {
     mo2Path: string;
@@ -122,8 +127,24 @@ export interface ContextPack {
     warnings: { kind: string; message: string; modName?: string; path?: string }[];
   };
   trace: PatchTrace[];
-  diagnosticGroups?: ConflictGroup[];
-  conflicts: ConflictGroup[];
+  diagnosticGroups: DiagnosticGroup[];
+  operationsById: Record<string, XmlPatchOperation>;
+  modsById: Record<string, ModRoot>;
+  filesById: Record<string, { path: string; operationIds: string[]; modIds: string[] }>;
+  replayEvidenceByGroupId: Record<string, ReplayEvidence>;
+  coverage: {
+    totalOperations: number;
+    candidateOperations: number;
+    replayedOperations: number;
+    partialOperations: number;
+    skippedOperations: number;
+    candidateGroups: number;
+    exactGroups: number;
+    footprintGroups: number;
+    fallbackGroups: number;
+    budgetGroups: number;
+    warnings: { kind: string; message: string; modName?: string; path?: string }[];
+  };
   logs: {
     latestLogPath?: string;
     warnings: { path: string; line: number; text: string; relatedMods: string[] }[];
@@ -212,6 +233,7 @@ export interface UiConflict {
   node: string;
   target: string;
   exact: boolean;
+  proof?: DiagnosticGroup["proof"];
   winner: string;
   operations: XmlPatchOperation[];
   evidence: UiConflictEvidence[];
@@ -241,8 +263,8 @@ export interface UiModel {
     totalPatches: number;
     warnings: number;
     conflicts: number;
-    exactConflictGroups: number;
-    fallbackConflictGroups: number;
+    exactDiagnosticGroups: number;
+    fallbackDiagnosticGroups: number;
     replayWarnings: number;
     missingXPath: number;
     loadOrderDependent: number;

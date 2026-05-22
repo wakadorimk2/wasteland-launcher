@@ -51,7 +51,7 @@ addMo2Options(program.command("conflicts").description("Report XML patch conflic
       printJson(detection.diagnosticGroups);
       return;
     }
-    printConflicts(detection.diagnosticGroups);
+    printConflicts(detection.diagnosticGroups, detection.operationsById);
   });
 
 addMo2Options(program.command("logs")
@@ -132,16 +132,20 @@ function printScan(scan: Awaited<ReturnType<typeof scanMo2>>): void {
   })));
 }
 
-function printConflicts(conflicts: Awaited<ReturnType<typeof detectConflicts>>["conflicts"]): void {
-  console.log(`Diagnostic groups: ${conflicts.length}`);
-  console.table(conflicts.slice(0, 120).map((group) => ({
+function printConflicts(
+  diagnosticGroups: Awaited<ReturnType<typeof detectConflicts>>["diagnosticGroups"],
+  operationsById: Awaited<ReturnType<typeof detectConflicts>>["operationsById"]
+): void {
+  console.log(`Diagnostic groups: ${diagnosticGroups.length}`);
+  console.table(diagnosticGroups.slice(0, 120).map((group) => ({
     file: group.file,
     target: group.displayTarget,
     classification: group.classification,
     confidence: group.confidence,
+    proof: group.proof,
     risk: group.risk,
-    mods: [...new Set(group.operations.map((operation) => operation.modName))].join(" -> "),
-    primary: group.winner?.modName ?? group.primaryOpId,
+    mods: [...new Set(group.operationIds.map((opId) => operationsById[opId]?.modName ?? opId))].join(" -> "),
+    primary: operationsById[group.primaryOpId]?.modName ?? group.primaryOpId,
     source: group.source
   })));
 }

@@ -1,4 +1,4 @@
-import { normalizeXpath } from "./xpath.js";
+import { compileXPathSubset, normalizeXpath } from "./xpath.js";
 import { XmlPatchOperation } from "./types.js";
 
 export type PatchFootprintPrecision = "supported" | "broad" | "unknown";
@@ -23,6 +23,8 @@ export interface PatchFootprint {
   precision: PatchFootprintPrecision;
   reasons: string[];
 }
+
+export type FootprintClassification = "commutes" | "non_commutes" | "unknown";
 
 const supportedOperations = new Set(["set", "setattribute", "removeattribute", "append", "remove", "insertbefore", "insertafter"]);
 
@@ -85,6 +87,17 @@ export function groupFootprintsByFile(footprints: PatchFootprint[]): Map<string,
   return grouped;
 }
 
+export function classifyFootprintPair(a: PatchFootprint, b: PatchFootprint): FootprintClassification {
+  if (a.file !== b.file) return "commutes";
+  if (a.precision === "unknown" || b.precision === "unknown") return "unknown";
+  if (intersects(a.writtenScalarSlots, b.writtenScalarSlots)) return "non_commutes";
+  if (intersects(a.removedNodeSelectors, [...b.writtenScalarSlots, ...b.insertedChildSlots, ...b.reads])) return "non_commutes";
+  if (intersects(b.removedNodeSelectors, [...a.writtenScalarSlots, ...a.insertedChildSlots, ...a.reads])) return "non_commutes";
+  if (intersects(a.insertedChildSlots, b.insertedChildSlots)) return "non_commutes";
+  if (a.precision === "broad" || b.precision === "broad") return "unknown";
+  return "commutes";
+}
+
 function emptyFootprint(
   operation: XmlPatchOperation,
   operationName: string,
@@ -141,7 +154,8 @@ function precisionFor(operationName: string, xpath: string): PatchFootprintPreci
   if (!supportedOperations.has(operationName)) {
     return "unknown";
   }
-  if (!isStaticPathLike(xpath)) {
+  const compiled = compileXPathSubset(xpath);
+  if (!compiled.supported) {
     return "unknown";
   }
   return hasBroadXpathShape(xpath) ? "broad" : "supported";
@@ -234,4 +248,20 @@ function splitXpathSegments(xpath: string): string[] {
     segments.push(last);
   }
   return segments;
+}
+
+function intersects(a: PatchFootprintSelector[], b: PatchFootprintSelector[]): boolean {
+  return a.some((left) => b.some((right) => selectorsOverlap(left, right)));
+}
+
+function selectorsOverlap(a: PatchFootprintSelector, b: PatchFootprintSelector): boolean {
+  if (a.file !== b.file) return false;
+  const left = selectorComparablePath(a);
+  const right = selectorComparablePath(b);
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function selectorComparablePath(selector: PatchFootprintSelector): string {
+  if (selector.kind === "attribute") return `${selector.normalizedXpath}/@${selector.attribute ?? ""}`;
+  return selector.normalizedXpath;
 }

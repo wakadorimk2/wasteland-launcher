@@ -63,14 +63,6 @@ export interface ScanResult {
   warnings: ScanWarning[];
 }
 
-export interface ConflictGroup {
-  file: string;
-  normalizedXpath: string;
-  operations: XmlPatchOperation[];
-  winner: XmlPatchOperation;
-  exact: boolean;
-}
-
 export type OperationId = string;
 export type TargetKey = string;
 
@@ -127,23 +119,43 @@ export interface DiagnosticGroup {
   classification: DiagnosticClassification;
   risk: "info" | "warn" | "danger" | "critical";
   confidence: DiagnosticConfidence;
+  proof: "exact" | "footprint" | "fallback" | "partial";
   targetKey: TargetKey;
   displayTarget: string;
   operationIds: OperationId[];
-  operations: XmlPatchOperation[];
   primaryOpId: OperationId;
   relatedOpIds: OperationId[];
-  evidence: DiagnosticEvidence[];
-  source: "replay" | "footprint" | "normalized";
+  source: "replay" | "footprint" | "normalized" | "budget";
   orderDependent: boolean;
-  winner: XmlPatchOperation;
   normalizedXpath: string;
-  exact: boolean;
+}
+
+export interface ReplayEvidence {
+  groupId: string;
+  proof: DiagnosticGroup["proof"];
+  evidence: DiagnosticEvidence[];
+  traceIds: OperationId[];
+}
+
+export interface ReplayCoverage {
+  totalOperations: number;
+  candidateOperations: number;
+  replayedOperations: number;
+  partialOperations: number;
+  skippedOperations: number;
+  candidateGroups: number;
+  exactGroups: number;
+  footprintGroups: number;
+  fallbackGroups: number;
+  budgetGroups: number;
+  warnings: ScanWarning[];
 }
 
 export interface ConflictDetectionResult {
   diagnosticGroups: DiagnosticGroup[];
-  conflicts: DiagnosticGroup[];
+  operationsById: Record<OperationId, XmlPatchOperation>;
+  replayEvidenceByGroupId: Record<string, ReplayEvidence>;
+  coverage: ReplayCoverage;
   trace: PatchTrace[];
   warnings: ScanWarning[];
 }
@@ -222,10 +234,15 @@ export interface LogScanResult {
 }
 
 export interface ContextPack {
+  schemaVersion: 3;
   generatedAt: string;
   scan: ScanResult;
   trace: PatchTrace[];
   diagnosticGroups: DiagnosticGroup[];
-  conflicts: DiagnosticGroup[];
+  operationsById: Record<OperationId, XmlPatchOperation>;
+  modsById: Record<string, ModRoot>;
+  filesById: Record<string, { path: string; operationIds: OperationId[]; modIds: string[] }>;
+  replayEvidenceByGroupId: Record<string, ReplayEvidence>;
+  coverage: ReplayCoverage;
   logs: LogScanResult;
 }

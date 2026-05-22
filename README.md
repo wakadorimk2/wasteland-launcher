@@ -29,12 +29,12 @@ Generate `ui/public/context.json` first, then start the Vite UI. The app auto-lo
 
 The Dashboard summarizes the current pack:
 
-- `Conflict groups`: reviewable groups derived from `ContextPack.diagnosticGroups` (`conflicts` is kept as a transitional alias).
+- `Candidate groups`: reviewable groups derived from schema v3 `ContextPack.diagnosticGroups`.
 - `Exact replay-proven`: groups where replay effects proved a concrete shared target.
-- `Fallback`: conservative groups from footprint or normalized XPath evidence when exact replay evidence was unavailable.
-- `Replay warnings`: non-ok trace diagnostics such as misses, unsupported operations, parse errors, broad matches, or budget-limited traces.
+- `Unknown risk`: conservative groups from footprint or normalized XPath evidence when exact replay evidence was unavailable.
+- `Coverage`: non-ok trace diagnostics such as misses, unsupported operations, parse errors, broad matches, or budget-limited traces.
 
-The Diagnostics view is the main Phase 3 conflict viewer. It reads `ContextPack.diagnosticGroups` first, joins each operation to replay evidence from `ContextPack.trace`, and shows target keys, classification, confidence, operation timeline, and evidence pane. XML identity is no longer based on normalized XPath alone: replay effects carry `targetKey` values such as scalar slots, child slots, and removed node keys. Same-parent `append` and anchored insert operations are retained as order-dependent structural diagnostics because sibling order can be part of the final XML result.
+The Diagnostics view is the schema v3 candidate viewer. It reads only `ContextPack.diagnosticGroups`, hydrates operation references through `ContextPack.operationsById`, joins targeted replay evidence from `ContextPack.trace`, and shows target keys, classification, confidence, operation timeline, and evidence pane. XML identity is no longer based on normalized XPath alone: replay effects carry `targetKey` values such as scalar slots, child slots, and removed node keys. Same-parent `append` and anchored insert operations are retained as order-dependent structural diagnostics because sibling order can be part of the final XML result.
 
 For cache-busting or a production-build check, you can preview a built UI on an alternate local port:
 

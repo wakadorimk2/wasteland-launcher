@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
-import { ContextPack, DiagnosticGroup, PatchTrace, PatchTraceEffect, XmlPatchOperation } from "./types.js";
+import { ContextPack, DiagnosticGroup, ModRoot, PatchTrace, PatchTraceEffect, XmlPatchOperation } from "./types.js";
 import { scanMo2 } from "./scanner.js";
 import { scanLatestClientLog } from "./logs.js";
 import { defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
@@ -14,7 +14,9 @@ export async function buildContextPack(
 ): Promise<ContextPack> {
   const scan = await scanMo2(mo2Path, profile);
   const detection = await detectConflicts(scan.xmlPatches, gamePath, traceOptions);
+  const operationsById = Object.fromEntries(Object.entries(detection.operationsById).map(([opId, operation]) => [opId, compactOperation(operation)]));
   return compactContextPack({
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     scan: {
       ...scan,
@@ -23,7 +25,11 @@ export async function buildContextPack(
     },
     trace: detection.trace.map(compactTrace),
     diagnosticGroups: detection.diagnosticGroups.map(compactDiagnosticGroup),
-    conflicts: detection.conflicts.map(compactDiagnosticGroup),
+    operationsById,
+    modsById: modsById(scan.enabledMods),
+    filesById: filesById(scan.xmlPatches),
+    replayEvidenceByGroupId: compactReplayEvidence(detection.replayEvidenceByGroupId),
+    coverage: detection.coverage,
     logs: await scanLatestClientLog(undefined, scan.enabledMods)
   });
 }
@@ -34,40 +40,33 @@ export async function writeContextPack(filePath: string, pack: ContextPack): Pro
 }
 
 const maxInlineText = 2_000;
-const maxGroupOperations = 80;
 
 function compactContextPack(pack: ContextPack): ContextPack {
   return pack;
 }
 
 function compactDiagnosticGroup(group: DiagnosticGroup): DiagnosticGroup {
-  const operations = group.operations.map(compactOperation);
-  const cappedOperations = operations.length > maxGroupOperations
-    ? [...operations.slice(0, maxGroupOperations / 2), ...operations.slice(-maxGroupOperations / 2)]
-    : operations;
-  const cappedOperationIds = group.operationIds.length > maxGroupOperations
-    ? [...group.operationIds.slice(0, maxGroupOperations / 2), ...group.operationIds.slice(-maxGroupOperations / 2)]
-    : group.operationIds;
-  const cappedOperationKeys = new Set(cappedOperationIds);
   return {
     ...group,
-    operations: cappedOperations,
-    operationIds: cappedOperationIds,
-    relatedOpIds: group.relatedOpIds.filter((opId) => cappedOperationKeys.has(opId)),
-    evidence: group.evidence
-      .filter((item) => cappedOperationKeys.has(item.opId) || item.opId === group.primaryOpId)
-      .map((item) => ({
-        ...item,
-        effects: item.effects.map(compactEffect),
-        slotVersions: item.slotVersions.map((slot) => ({
-          ...slot,
-          before: compactText(slot.before),
-          after: compactText(slot.after)
-        })),
-        note: compactText(item.note)
-      })),
-    winner: compactOperation(group.winner)
+    operationIds: group.operationIds,
+    relatedOpIds: group.relatedOpIds
   };
+}
+
+function compactReplayEvidence(value: ContextPack["replayEvidenceByGroupId"]): ContextPack["replayEvidenceByGroupId"] {
+  return Object.fromEntries(Object.entries(value).map(([groupId, item]) => [groupId, {
+    ...item,
+    evidence: item.evidence.map((evidence) => ({
+      ...evidence,
+      effects: evidence.effects.map(compactEffect),
+      slotVersions: evidence.slotVersions.map((slot) => ({
+        ...slot,
+        before: compactText(slot.before),
+        after: compactText(slot.after)
+      })),
+      note: compactText(evidence.note)
+    }))
+  }]));
 }
 
 function compactTrace(trace: PatchTrace): PatchTrace {
@@ -95,6 +94,25 @@ function compactOperation(operation: XmlPatchOperation): XmlPatchOperation {
     valueText: compactText(operation.valueText),
     valueSummary: compactText(operation.valueSummary)
   };
+}
+
+function modsById(mods: ModRoot[]): ContextPack["modsById"] {
+  return Object.fromEntries(mods.map((mod) => [mod.mo2Name, mod]));
+}
+
+function filesById(operations: XmlPatchOperation[]): ContextPack["filesById"] {
+  const files = new Map<string, { path: string; operationIds: string[]; modIds: string[] }>();
+  for (const operation of operations) {
+    const current = files.get(operation.file) ?? { path: operation.file, operationIds: [], modIds: [] };
+    current.operationIds.push(operationId(operation));
+    if (!current.modIds.includes(operation.modName)) current.modIds.push(operation.modName);
+    files.set(operation.file, current);
+  }
+  return Object.fromEntries(files);
+}
+
+function operationId(operation: XmlPatchOperation): string {
+  return `${operation.file}:${operation.order}:${operation.line}:${operation.operation}:${operation.xpath}`;
 }
 
 function compactText(value: string | undefined): string | undefined {

@@ -1,9 +1,9 @@
 import { buildPatchTrace, defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
 import { extractPatchFootprints, PatchFootprint, PatchFootprintSelector } from "./footprint.js";
-import { ConflictDetectionResult, DiagnosticClassification, DiagnosticConfidence, DiagnosticEvidence, DiagnosticGroup, PatchDiagnosticKind, PatchTrace, PatchTraceEffect, SlotVersion, XmlPatchOperation } from "./types.js";
+import { ConflictDetectionResult, DiagnosticClassification, DiagnosticConfidence, DiagnosticEvidence, DiagnosticGroup, PatchDiagnosticKind, PatchTrace, PatchTraceEffect, ReplayCoverage, ReplayEvidence, SlotVersion, XmlPatchOperation } from "./types.js";
 import { normalizeXpath } from "./xpath.js";
 
-type ConflictSource = "replay" | "footprint" | "normalized";
+type ConflictSource = "replay" | "footprint" | "normalized" | "budget";
 type OperationKey = string;
 
 interface OperationEffect {
@@ -27,6 +27,12 @@ interface PendingGroup {
   orderDependent: boolean;
 }
 
+interface MaterializedGroup {
+  group: DiagnosticGroup;
+  operations: XmlPatchOperation[];
+  evidence: DiagnosticEvidence[];
+}
+
 const scalarEffectKinds = new Set<PatchTraceEffect["kind"]>(["setValue", "setAttribute", "removeAttribute", "appendAttributeText"]);
 const structuralEffectKinds = new Set<PatchTraceEffect["kind"]>(["removeNode", "appendChild", "insertBefore", "insertAfter"]);
 const fallbackTraceStatuses = new Set<PatchTrace["status"]>(["missed", "unsupported", "parseError", "partial"]);
@@ -36,20 +42,34 @@ export async function detectConflicts(
   gamePath = defaultGameInstallPath(),
   options: TraceOptions = {}
 ): Promise<ConflictDetectionResult> {
-  const replay = await buildPatchTrace(operations, gamePath, options);
-  const operationByTraceId = mapOperationsByTraceId(operations);
   const pending: PendingGroup[] = [];
+  pending.push(...detectFootprintConflicts(operations));
+  pending.push(...detectNormalizedXpathConflicts(candidateFallbackOperations(operations)));
 
+  const replayOperations = replayCandidates(operations, pending);
+  const replay = await buildPatchTrace(replayOperations, gamePath, {
+    ...options,
+    timeoutMs: options.timeoutMs ?? 2_000
+  });
+  const operationByTraceId = mapOperationsByTraceId(replayOperations);
   pending.push(...detectReplayConflicts(replay.trace, operationByTraceId));
 
-  const fallbackOperations = operationsNeedingFallback(operations, replay.trace);
-  pending.push(...detectFootprintConflicts(fallbackOperations));
-  pending.push(...detectNormalizedXpathConflicts(fallbackOperations));
-  const diagnosticGroups = materializeGroups(pending);
+  const materialized = materializeGroups(pending);
+  const diagnosticGroups = materialized.map((item) => item.group);
+  const replayEvidenceByGroupId = Object.fromEntries(materialized.map((item) => [item.group.id, {
+    groupId: item.group.id,
+    proof: item.group.proof,
+    evidence: item.evidence,
+    traceIds: item.evidence.map((evidence) => evidence.opId)
+  } satisfies ReplayEvidence]));
+  const operationsById = Object.fromEntries(operations.map((operation) => [operationId(operation), operation]));
+  const coverage = coverageFor(operations, replayOperations, replay.trace, diagnosticGroups, replay.warnings);
 
   return {
     diagnosticGroups,
-    conflicts: diagnosticGroups,
+    operationsById,
+    replayEvidenceByGroupId,
+    coverage,
     trace: replay.trace,
     warnings: replay.warnings
   };
@@ -276,7 +296,7 @@ function detectNormalizedXpathConflicts(operations: XmlPatchOperation[]): Pendin
   });
 }
 
-function materializeGroups(pending: PendingGroup[]): DiagnosticGroup[] {
+function materializeGroups(pending: PendingGroup[]): MaterializedGroup[] {
   const byOperationSet = new Map<string, PendingGroup>();
   const acceptedOperationSetsBySource = new Map<string, ConflictSource[]>();
   const orderedPending = [...pending].sort((a, b) => sourcePriority(a.source) - sourcePriority(b.source));
@@ -301,28 +321,27 @@ function materializeGroups(pending: PendingGroup[]): DiagnosticGroup[] {
       const operations = uniqueOperations(group.operations).sort((a, b) => a.order - b.order);
       const primary = operations[operations.length - 1];
       const operationIds = operations.map(operationId);
-      return {
+      const evidence = evidenceFor(group, operations);
+      const diagnosticGroup: DiagnosticGroup = {
         id: `dg${index + 1}`,
         file: group.file,
         kind: group.kind,
         classification: group.classification,
         risk: riskForGroup(group),
         confidence: group.confidence,
+        proof: proofForGroup(group),
         targetKey: group.targetKey,
         displayTarget: group.target,
         operationIds,
         normalizedXpath: group.target,
-        operations,
         primaryOpId: operationId(primary),
         relatedOpIds: operationIds.slice(0, -1),
-        evidence: evidenceFor(group, operations),
         source: group.source,
         orderDependent: group.orderDependent,
-        winner: primary,
-        exact: group.exact
-      } satisfies DiagnosticGroup;
+      };
+      return { group: diagnosticGroup, operations, evidence };
     })
-    .sort((a, b) => a.file.localeCompare(b.file) || a.normalizedXpath.localeCompare(b.normalizedXpath));
+    .sort((a, b) => a.group.file.localeCompare(b.group.file) || a.group.normalizedXpath.localeCompare(b.group.normalizedXpath));
 }
 
 function pendingGroup(group: PendingGroup): PendingGroup {
@@ -393,14 +412,52 @@ function operationId(operation: XmlPatchOperation): string {
   return `${operation.file}:${operation.order}:${operation.line}:${operation.operation}:${operation.xpath}`;
 }
 
-function operationsNeedingFallback(operations: XmlPatchOperation[], trace: PatchTrace[]): XmlPatchOperation[] {
-  const fallbackKeys = new Set<OperationKey>();
-  for (const item of trace) {
-    if (fallbackTraceStatuses.has(item.status) || item.effects.some((effect) => effect.kind === "unsupported" || effect.kind === "parseError" || effect.kind === "miss")) {
-      fallbackKeys.add(traceOperationKey(item));
-    }
+function candidateFallbackOperations(operations: XmlPatchOperation[]): XmlPatchOperation[] {
+  const byFile = new Map<string, XmlPatchOperation[]>();
+  for (const operation of operations) pushMap(byFile, operation.file, operation);
+  return [...byFile.values()].filter(hasMultipleMods).flat();
+}
+
+function replayCandidates(operations: XmlPatchOperation[], pending: PendingGroup[]): XmlPatchOperation[] {
+  const ids = new Set<OperationKey>();
+  for (const group of pending) {
+    for (const operation of group.operations) ids.add(operationKey(operation));
   }
-  return operations.filter((operation) => fallbackKeys.has(operationKey(operation)));
+  if (ids.size === 0) {
+    for (const operation of candidateFallbackOperations(operations)) ids.add(operationKey(operation));
+  }
+  return operations.filter((operation) => ids.has(operationKey(operation)));
+}
+
+function proofForGroup(group: PendingGroup): DiagnosticGroup["proof"] {
+  if (group.source === "replay" && group.exact) return "exact";
+  if (group.source === "footprint") return "footprint";
+  if (group.source === "budget") return "partial";
+  return "fallback";
+}
+
+function coverageFor(
+  operations: XmlPatchOperation[],
+  replayOperations: XmlPatchOperation[],
+  trace: PatchTrace[],
+  groups: DiagnosticGroup[],
+  warnings: ConflictDetectionResult["warnings"]
+): ReplayCoverage {
+  const replayed = new Set(trace.filter((item) => item.status !== "partial").map(traceOperationKey));
+  const partial = new Set(trace.filter((item) => item.status === "partial").map(traceOperationKey));
+  return {
+    totalOperations: operations.length,
+    candidateOperations: replayOperations.length,
+    replayedOperations: replayed.size,
+    partialOperations: partial.size,
+    skippedOperations: Math.max(0, replayOperations.length - replayed.size - partial.size),
+    candidateGroups: groups.length,
+    exactGroups: groups.filter((group) => group.proof === "exact").length,
+    footprintGroups: groups.filter((group) => group.proof === "footprint").length,
+    fallbackGroups: groups.filter((group) => group.proof === "fallback").length,
+    budgetGroups: groups.filter((group) => group.proof === "partial").length,
+    warnings
+  };
 }
 
 function replayEffects(trace: PatchTrace[], operationByTraceId: Map<string, XmlPatchOperation>): OperationEffect[] {
@@ -489,5 +546,6 @@ function pushMap<K, V>(map: Map<K, V[]>, key: K, value: V): void {
 function sourcePriority(source: ConflictSource): number {
   if (source === "replay") return 0;
   if (source === "footprint") return 1;
-  return 2;
+  if (source === "normalized") return 2;
+  return 3;
 }
