@@ -71,6 +71,12 @@ export interface ConflictGroup {
   exact: boolean;
 }
 
+export interface ConflictDetectionResult {
+  conflicts: ConflictGroup[];
+  trace: PatchTrace[];
+  warnings: ScanWarning[];
+}
+
 export type PatchTraceStatus = "applied" | "missed" | "unsupported" | "parseError" | "ambiguous" | "partial";
 
 export type PatchDiagnosticKind =

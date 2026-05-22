@@ -36,15 +36,23 @@ addMo2Options(program.command("scan").description("Scan enabled mods, ModInfo, X
     printScan(scan);
   });
 
-addMo2Options(program.command("conflicts").description("Report simple XML xpath conflicts"))
+addMo2Options(program.command("conflicts").description("Report XML patch conflicts"))
+  .option("--game <path>", "7 Days to Die install path for vanilla Data/Config resolution")
+  .option("--resolve-mode <mode>", "conflict resolution mode: fast or exact", "fast")
+  .option("--resolve-timeout-ms <ms>", "best-effort conflict resolution budget in milliseconds", "8000")
   .action(async (options) => {
     const scan = await scanMo2(options.mo2, options.profile);
-    const conflicts = detectConflicts(scan.xmlPatches);
+    const mode = options.resolveMode === "exact" ? "exact" : "fast";
+    const timeoutMs = Number.parseInt(options.resolveTimeoutMs, 10);
+    const detection = await detectConflicts(scan.xmlPatches, options.game, {
+      mode,
+      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 8000
+    });
     if (wantsJson(options)) {
-      printJson(conflicts);
+      printJson(detection.conflicts);
       return;
     }
-    printConflicts(conflicts);
+    printConflicts(detection.conflicts);
   });
 
 addMo2Options(program.command("logs")
@@ -140,7 +148,7 @@ function printScan(scan: Awaited<ReturnType<typeof scanMo2>>): void {
   })));
 }
 
-function printConflicts(conflicts: ReturnType<typeof detectConflicts>): void {
+function printConflicts(conflicts: Awaited<ReturnType<typeof detectConflicts>>["conflicts"]): void {
   console.log(`Conflict groups: ${conflicts.length}`);
   console.table(conflicts.slice(0, 120).map((group) => ({
     file: group.file,

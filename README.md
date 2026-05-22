@@ -8,7 +8,7 @@ Read-only TypeScript CLI for inspecting a 7 Days to Die Mod Organizer 2 workspac
 npm install
 npm test
 node dist/cli.js scan --mo2 C:\Modding\MO2 --profile Default
-node dist/cli.js conflicts --mo2 C:\Modding\MO2 --profile Default
+node dist/cli.js conflicts --mo2 C:\Modding\MO2 --profile Default --game "C:\Program Files (x86)\Steam\steamapps\common\7 Days To Die"
 node dist/cli.js logs --latest
 node dist/cli.js inventory --mo2 C:\Modding\MO2 --profile Default --waka
 node dist/cli.js context-pack --mo2 C:\Modding\MO2 --profile Default --out _analysis\wasteland-context.json
@@ -34,7 +34,7 @@ If `ui/public/context.json` is absent, the app loads bundled sample diagnostics.
 - Resolves both direct `ModInfo.xml` roots and nested child mod roots.
 - Indexes `Config/*.xml` patch operations and their xpath/path attributes.
 - Records DLL filename, size, modified time, and SHA-256 hash.
-- Reports simple same-file xpath conflicts and the last modlist winner.
+- Reports XML patch conflicts from replayed effects, with conservative XPath fallback when vanilla XML cannot be replayed.
 - Reads the latest non-empty client log from `%APPDATA%\7DaysToDie\logs`.
 - Renders a static, self-contained HTML conflict dashboard from a context-pack JSON file.
 

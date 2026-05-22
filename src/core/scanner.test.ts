@@ -42,7 +42,7 @@ test("scan resolves direct and nested ModInfo, XML patches, DLLs, and conflicts"
   assert.equal(scan.dlls.length, 1);
   assert.equal(scan.enabledMods[1].displayName, "Bravo");
 
-  const conflicts = detectConflicts(scan.xmlPatches);
+  const { conflicts } = await detectConflicts(scan.xmlPatches);
   assert.equal(conflicts.length, 1);
   assert.equal(conflicts[0].winner.modName, "A");
 });

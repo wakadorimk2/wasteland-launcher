@@ -1,4 +1,4 @@
-import { normalizeXpath } from "./conflicts.js";
+import { normalizeXpath } from "./xpath.js";
 import { XmlPatchOperation } from "./types.js";
 
 export type PatchFootprintPrecision = "supported" | "broad" | "unknown";

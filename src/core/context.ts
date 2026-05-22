@@ -3,7 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { ContextPack } from "./types.js";
 import { scanMo2 } from "./scanner.js";
 import { scanLatestClientLog } from "./logs.js";
-import { buildPatchTrace, defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
+import { defaultGameInstallPath, TraceOptions } from "./patchTrace.js";
+import { detectConflicts } from "./conflicts.js";
 
 export async function buildContextPack(
   mo2Path: string,
@@ -12,15 +13,15 @@ export async function buildContextPack(
   traceOptions: TraceOptions = {}
 ): Promise<ContextPack> {
   const scan = await scanMo2(mo2Path, profile);
-  const replay = await buildPatchTrace(scan.xmlPatches, gamePath, traceOptions);
+  const detection = await detectConflicts(scan.xmlPatches, gamePath, traceOptions);
   return {
     generatedAt: new Date().toISOString(),
     scan: {
       ...scan,
-      warnings: [...scan.warnings, ...replay.warnings]
+      warnings: [...scan.warnings, ...detection.warnings]
     },
-    trace: replay.trace,
-    conflicts: [],
+    trace: detection.trace,
+    conflicts: detection.conflicts,
     logs: await scanLatestClientLog(undefined, scan.enabledMods)
   };
 }
